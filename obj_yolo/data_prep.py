@@ -13,10 +13,10 @@ BASE_DATA_PATH = os.getenv("BASE_DATA_PATH", "./data")
 CLIENT_DATA_PATH = Path(os.getenv("CLIENT_DATA_PATH", "./prepared_data/clients"))
 GLOBAL_DATA_PATH = Path(os.getenv("GLOBAL_DATA_PATH", "./yolo_datasets/global_dataset"))
 CLIENT_DATA_COUNT = int(os.getenv("CLIENT_DATA_COUNT", 100))
-GLOBAL_DATA_COUNT = int(os.getenv("GLOBAL_DATA_COUNT", 1000)) 
+GLOBAL_DATA_COUNT = int(os.getenv("GLOBAL_DATA_COUNT", 100)) 
 CLIENTS = int(os.getenv("CLIENT_COUNT", 2))
 DATA_SPLIT = float(os.getenv("DATA_SPLIT", 0.8))
-NC = int(os.getenv("NC", 1))  # Number of classes
+NC = int(os.getenv("NC", 8))  # Number of classes
 CLASS_NAMES = ["Car", "Pedestrian", "Van", "Cyclist", "Truck", "Misc", "Tram", "Person_sitting"]
 
 # Ensure the base data path exists
@@ -34,8 +34,8 @@ def write_yolo_yaml(dataset_path: Path):
                              (e.g., ./yolo_datasets/global_dataset).
     """
     yaml_content = { 
-        "train": f"{dataset_path}/images/train",  # path to training images
-        "val": f"{dataset_path}images/val",      # path to validation images
+        "train": f"{dataset_path}\images\train",  # path to training images
+        "val": f"{dataset_path}\images\val",      # path to validation images
         "nc": NC,
         "names": CLASS_NAMES,
     }
