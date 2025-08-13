@@ -62,11 +62,11 @@ Follow these steps to set up and run the project:
 
 ### Notes
 
-- If your PC supports CUDA, install the CUDA-enabled PyTorch packages for improved performance:
-  ```bash
-  uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-  ```
-- Ensure all dependencies are installed as specified in the project requirements.
+- on a GPU machine with cuda, we can run any file using the command:
+
+```bash
+uv run --group gpu <file_name>
+```
 
 
 ## References
