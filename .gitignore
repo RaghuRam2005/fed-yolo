@@ -1,0 +1,6 @@
+/fed_yolo
+/data/
+yolov8n.pt
+previous versions
+/obj_yolo/__pycache__/
+/.venv

@@ -1,0 +1,13 @@
+[project]
+name = "obj-yolo"
+version = "0.1.0"
+description = "federated learning environment for yolo model"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dotenv>=0.9.9",
+    "flask>=3.1.1",
+    "pathlib>=1.0.1",
+    "requests>=2.32.4",
+    "ultralytics>=8.3.177",
+]
