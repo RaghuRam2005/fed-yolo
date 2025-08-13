@@ -6,17 +6,20 @@ import logging
 import os
 from ultralytics import YOLO
 from pathlib import Path
+from dotenv import load_dotenv
 import time
 
-# Import configuration
-from config import (
-    MODEL_NAME,
-    SERVER_HOST,
-    SERVER_PORT,
-    BASE_CLIENT_DATA_PATH,
-    LOCAL_EPOCHS,
-    CLIENT_DATA_COUNT
-)
+# Load environment variables
+load_dotenv()
+
+# load configuration
+MODEL_NAME = os.getenv("MODEL_PATH", "yolo11n_baseline.yaml")
+SERVER_HOST = os.getenv("SERVER_HOST", "localhost")
+SERVER_PORT = int(os.getenv("SERVER_PORT", 5000))
+CLIENT_DATA_PATH = os.getenv("CLIENT_DATA_PATH", "./prepared_data/clients")
+LOCAL_EPOCHS = int(os.getenv("LOCAL_EPOCHS", 3))
+CLIENT_DATA_COUNT = int(os.getenv("CLIENT_DATA_COUNT", 100))
+CLIENTS = int(os.getenv("CLIENT_COUNT", 2))
 
 # Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Client %(client_id)s] - %(message)s')
@@ -26,7 +29,7 @@ class YoloClient:
         self.client_id = client_id
         self.model = YOLO(MODEL_NAME)
         self.server_url = f"http://{SERVER_HOST}:{SERVER_PORT}"
-        self.data_path = str(Path(BASE_CLIENT_DATA_PATH) / f"client_{self.client_id}" / "data.yaml")
+        self.data_path = str(Path(CLIENT_DATA_PATH) / f"client_{self.client_id}" / "data.yaml")
         self.logger = logging.getLogger(__name__)
         self.log_adapter = logging.LoggerAdapter(self.logger, {'client_id': self.client_id})
 
@@ -139,7 +142,6 @@ def run_single_client(client_id: int):
     client.send_update(updated_state_dict)
 
 if __name__ == "__main__":
-    from config import CLIENTS
     print(f"\n--- Starting Simulation for {CLIENTS} Clients ---")
     print("NOTE: Run server.py in a separate terminal before running the clients.")
     for i in range(CLIENTS):

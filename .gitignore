@@ -4,3 +4,5 @@ yolov8n.pt
 previous versions
 /obj_yolo/__pycache__/
 /.venv
+obj_yolo.egg-info
+yolo11n.pt
