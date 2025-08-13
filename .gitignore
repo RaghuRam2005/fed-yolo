@@ -1,8 +1,20 @@
+# result folder
 /fed_yolo
+
+# data folder
 /data/
+
+# downloaded models
 yolov8n.pt
+yolo11n.pt
+
+# virtual environment files
+/.venv
+
+# env file
+/obj_yolo/.env
+
+# miscellaneous
 previous versions
 /obj_yolo/__pycache__/
-/.venv
 obj_yolo.egg-info
-yolo11n.pt
