@@ -3,7 +3,7 @@ name = "obj-yolo"
 version = "0.1.0"
 description = "federated learning environment for yolo model"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "dotenv>=0.9.9",
     "flask>=3.1.1",

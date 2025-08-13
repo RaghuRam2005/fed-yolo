@@ -6,32 +6,37 @@ import logging
 from collections import OrderedDict
 from typing import Dict, List
 from flask import Flask, request, send_file, jsonify
+from dotenv import load_dotenv
 import ultralytics
 from ultralytics import YOLO
 from ultralytics.engine.model import Model
 from pathlib import Path
 
-# Import configuration
-from config import (
-    MODEL_NAME,
-    GLOBAL_DATA_PATH,
-    SERVER_HOST,
-    SERVER_PORT,
-    CLIENTS,
-    GLOBAL_EPOCHS
-)
+# load environment variables
+load_dotenv()
+
+# Load configuration
+MODEL_NAME = os.getenv("MODEL_PATH", "yolo11n_baseline.yaml")
+SERVER_HOST = os.getenv("SERVER_HOST", "localhost")
+SERVER_PORT = int(os.getenv("SERVER_PORT", 5000))
+CLIENTS = int(os.getenv("CLIENTS", 5))
+GLOBAL_EPOCHS = int(os.getenv("GLOBAL_EPOCHS", 5))
+GLOBAL_DATA_PATH = Path(os.getenv("GLOBAL_DATA_PATH", "./yolo_datasets/global_dataset"))
+if not GLOBAL_DATA_PATH.exists():
+    raise Exception(f"Global data path {GLOBAL_DATA_PATH} does not exist. Please check your configuration.")
+
+is_available = torch.cuda.is_available()
+if is_available:
+    print(f"CUDA is available. Using GPU for training.")
+else:
+    print(f"CUDA is not available. Using CPU for training.")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def train_global_model(model:Model, data_path:Path, epochs:int=3) -> List[torch.nn.ParameterDict]:
+def train_global_model(model: Model, data_path: Path, epochs: int = 3) -> List[torch.nn.ParameterDict]:
     """
     Trains the YOLO model using the custom dataset
-
-    Args:
-        model (Model): Model object
-        epochs (int): Number of rounds to train the data
-        data_path (Path): YAML file path
     """
     print("--------------------------------------------------------")
     print("started training the global model")
@@ -46,7 +51,6 @@ def train_global_model(model:Model, data_path:Path, epochs:int=3) -> List[torch.
         device=-1,
         warmup_epochs=3,
         cos_lr=True,
-
         augment=True,
         hsv_h=0.015,
         hsv_s=0.7,
@@ -60,7 +64,8 @@ def train_global_model(model:Model, data_path:Path, epochs:int=3) -> List[torch.
         fliplr=0.5,
         mosaic=1.0,
         mixup=0.0,
-        copy_paste=0.0
+        copy_paste=0.0,
+        workers=0
     )
     print("global model training complete")
     results = model.val(
@@ -76,9 +81,8 @@ def train_global_model(model:Model, data_path:Path, epochs:int=3) -> List[torch.
     print("mAP (75)   : ", results.box.map75)
     return model.model.state_dict()
 
-
 class FedServer:
-    def __init__(self, global_parameters:torch.nn.ParameterDict, min_clients_for_aggregation: int = 1):
+    def __init__(self, global_parameters: torch.nn.ParameterDict, min_clients_for_aggregation: int = 1):
         self.global_parameters = global_parameters
         self.training_round = 0
         self.client_updates = []
@@ -92,10 +96,6 @@ class FedServer:
         return self.global_parameters
 
     def aggregate_fit(self, new_parameters: List[OrderedDict], client_data_counts: List[int]):
-        """
-        Aggregates client model updates and updates the global_parameters.
-        It does NOT load the new state into a model here.
-        """
         assert len(new_parameters) == len(client_data_counts), \
             "Parameter and data count lists must have the same length"
 
@@ -121,30 +121,19 @@ class FedServer:
         logging.info(f"Aggregation complete. Global parameters updated for round {self.training_round}.")
 
     def aggregate_evaluate(self, data_path: str):
-        """
-        Performs evaluation by creating a temporary model instance and loading
-        the current global parameters into it.
-        """
         logging.info(f"Evaluating aggregated model of round {self.training_round}...")
 
-        # Create a temporary model instance for this evaluation.
         eval_model = YOLO(MODEL_NAME)
-        
-        # Load the global parameters. Use strict=False because the head will likely mismatch
-        # the initial 80-class head of the new model instance.
         eval_model.model.load_state_dict(self.global_parameters, strict=False)
         logging.info("Loaded global parameters into a temporary evaluation model.")
 
-        # The .val() function is smart. It will read the `nc` (number of classes)
-        # from the data_path's YAML file and automatically adjust the model's head
-        # to match the validation dataset before running evaluation.
         results = eval_model.val(
             data=data_path,
             save_json=True,
-            device='cpu',
             project="fed_yolo",
             name=f"eval_round_{self.training_round}",
-            exist_ok=True
+            exist_ok=True,
+            device=-1,
         )
 
         logging.info("--- Global Model Validation Metrics ---")
@@ -160,7 +149,6 @@ class FedServer:
             "map75": results.box.map75
         }
 
-
 app = Flask(__name__)
 model = YOLO(MODEL_NAME)
 data_path = Path(GLOBAL_DATA_PATH) / "data.yaml"
@@ -170,9 +158,7 @@ custom_state = model.model.state_dict()
 filtered_state = {k: v for k, v in pretrained_state.items()
                   if k in custom_state and v.shape == custom_state[k].shape}
 model.model.load_state_dict(filtered_state, strict=False)
-model.model.model[-1] = ultralytics.nn.modules.head.Detect(nc=7, ch=[64, 128, 256])
-global_parameters = train_global_model(model=model, data_path=data_path, epochs=GLOBAL_EPOCHS)
-fed_server = FedServer(min_clients_for_aggregation=CLIENTS, global_parameters=global_parameters)
+model.model.model[-1] = ultralytics.nn.modules.head.Detect(nc=8, ch=[64, 128, 256])
 
 @app.route("/get_parameters", methods=["GET"])
 def get_parameters():
@@ -197,9 +183,7 @@ def submit_update():
     logging.info(f"Received update. Total updates: {len(fed_server.client_updates)}/{fed_server.min_clients_for_aggregation}")
 
     if len(fed_server.client_updates) >= fed_server.min_clients_for_aggregation:
-        # Step 1: Aggregate parameters
         fed_server.aggregate_fit(fed_server.client_updates, fed_server.client_data_counts)
-        # Step 2: Evaluate the new global parameters
         eval_path = Path(GLOBAL_DATA_PATH) / "data.yaml"
         metrics = fed_server.aggregate_evaluate(data_path=eval_path)
         
@@ -211,4 +195,6 @@ def submit_update():
     return jsonify({"status": f"Update received. Waiting for {fed_server.min_clients_for_aggregation - len(fed_server.client_updates)} more clients."})
 
 if __name__ == "__main__":
+    global_parameters = train_global_model(model=model, data_path=data_path, epochs=GLOBAL_EPOCHS)
+    fed_server = FedServer(min_clients_for_aggregation=CLIENTS, global_parameters=global_parameters)
     app.run(host=SERVER_HOST, port=SERVER_PORT, debug=False)
