@@ -638,13 +638,15 @@ wheels = [
 
 [[package]]
 name = "obj-yolo"
-version = "0.1.0"
+version = "1.0.2"
 source = { virtual = "." }
 dependencies = [
     { name = "dotenv" },
     { name = "flask" },
     { name = "pathlib" },
     { name = "requests" },
+    { name = "torch" },
+    { name = "torchvision" },
     { name = "ultralytics" },
 ]
 
@@ -654,6 +656,8 @@ requires-dist = [
     { name = "flask", specifier = ">=3.1.1" },
     { name = "pathlib", specifier = ">=1.0.1" },
     { name = "requests", specifier = ">=2.32.4" },
+    { name = "torch", specifier = ">=2.8.0" },
+    { name = "torchvision", specifier = ">=0.23.0" },
     { name = "ultralytics", specifier = ">=8.3.177" },
 ]
 

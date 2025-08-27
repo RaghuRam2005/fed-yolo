@@ -1,22 +1,15 @@
 [project]
+name = "obj-yolo"
+version = "1.0.2"
+description = "federated learning environment for yolo model"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "dotenv>=0.9.9",
     "flask>=3.1.1",
     "pathlib>=1.0.1",
     "requests>=2.32.4",
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
     "ultralytics>=8.3.177",
 ]
-
-[tool.uv.group.cpu.dependencies]
-torch = "*"
-torchvision = "*"
-
-[tool.uv.group.gpu.dependencies]
-torch = { version = "*", index = "pytorch-cuda" }
-torchvision = { version = "*", index = "pytorch-cuda" }
-
-[[tool.uv.index]]
-name = "pytorch-cuda"
-url = "https://download.pytorch.org/whl/cu126"
