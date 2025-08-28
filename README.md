@@ -62,11 +62,13 @@ Follow these steps to set up and run the project:
 
 ### Notes
 
-- on a GPU machine with cuda, we can run any file using the command:
+- on a GPU machine with cuda, we install cuda based pytorch using:
 
 ```bash
-uv run --group gpu <file_name>
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 ```
+
+- then you can run the code using python instead of `uv`.
 
 
 ## References

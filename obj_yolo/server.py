@@ -4,25 +4,28 @@ import os
 import torch
 import logging
 from collections import OrderedDict
-from typing import Dict, List
+from typing import List, Dict
 from flask import Flask, request, send_file, jsonify
-from dotenv import load_dotenv
-import ultralytics
 from ultralytics import YOLO
-from ultralytics.engine.model import Model
+from ultralytics.engine.model import Model, Results
 from pathlib import Path
 
-# load environment variables
-load_dotenv()
+# local imports
+from strategy import FedAvg, FedWeg
 
-# Load configuration
-MODEL_NAME = os.getenv("MODEL_PATH", "yolo11n_baseline.yaml")
-SERVER_HOST = os.getenv("SERVER_HOST", "localhost")
-SERVER_PORT = int(os.getenv("SERVER_PORT", 5000))
-CLIENTS = int(os.getenv("CLIENTS", 5))
-GLOBAL_EPOCHS = int(os.getenv("GLOBAL_EPOCHS", 5))
-GLOBAL_DATA_PATH = Path(os.getenv("GLOBAL_DATA_PATH", "./yolo_datasets/global_dataset"))
-if not GLOBAL_DATA_PATH.exists():
+# import configuration
+from config import (
+    MODEL_PATH,
+    CLIENTS_COUNT,
+    GLOBAL_DATA_PATH,
+    GLOBAL_EPOCHS,
+    SERVER_HOST,
+    SERVER_PORT,
+    STRATEGY
+)
+
+# check if global data path exists
+if not Path(GLOBAL_DATA_PATH).exists():
     raise Exception(f"Global data path {GLOBAL_DATA_PATH} does not exist. Please check your configuration.")
 
 is_available = torch.cuda.is_available()
@@ -34,7 +37,7 @@ else:
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def train_global_model(model: Model, data_path: Path, epochs: int = 3) -> List[torch.nn.ParameterDict]:
+def train_global_model(model: Model, data_path: str, epochs: int = 3) -> List[torch.nn.ParameterDict]:
     """
     Trains the YOLO model using the custom dataset
     """
@@ -79,122 +82,115 @@ def train_global_model(model: Model, data_path: Path, epochs: int = 3) -> List[t
     print("mAP (50-95): ", results.box.map)
     print("mAP (50)   : ", results.box.map50)
     print("mAP (75)   : ", results.box.map75)
-    return model.model.state_dict()
 
-class FedServer:
-    def __init__(self, global_parameters: torch.nn.ParameterDict, min_clients_for_aggregation: int = 1):
-        self.global_parameters = global_parameters
-        self.training_round = 0
+    return model
+
+def clone_state_dict(state_dict):
+    """
+    Create a deep clone of state dict with detached, contiguous tensors
+    """
+    cloned_dict = {}
+    for k, v in state_dict.items():
+        if isinstance(v, torch.Tensor):
+            cloned_dict[k] = v.detach().clone().contiguous()
+        else:
+            cloned_dict[k] = v
+    return cloned_dict
+
+class ServerApp:
+    def __init__(self, model:Model, strategy:str, min_clients:int):
+        self.model = model
+        self.strategy = strategy
+        self.min_clients_agg = min_clients
         self.client_updates = []
         self.client_data_counts = []
-        self.min_clients_for_aggregation = max(1, min_clients_for_aggregation)
+        self.client_masks = [] # only used in case of FedWeg algorithm
+    
+    def get_parameters_for_clients(self) -> OrderedDict:
+        return clone_state_dict(self.model.state_dict())
 
-        logging.info(f"FedServer initialized with model '{MODEL_NAME}'.")
-        logging.info(f"Waiting for {self.min_clients_for_aggregation} clients to trigger aggregation.")
+    def aggregate_fit(self, client_updates, client_data_counts) -> None:
+        self.model.train()
+        if self.strategy == "fedavg":
+            aggregated = FedAvg.aggregate_fit(client_updates, client_data_counts)
+            cloned_aggregated = clone_state_dict(aggregated)
+            self.model.load_state_dict(cloned_aggregated, strict=False)
+        elif self.strategy == "fedweg":
+            sparse_updates, masks_list = zip(*client_updates)
+            aggregated = FedWeg.aggregate_sparse_updates(
+                list(sparse_updates), list(masks_list), client_data_counts, self.model.state_dict()
+            )
+            cloned_aggregated = clone_state_dict(aggregated)
+            self.model.load_state_dict(cloned_aggregated, strict=False)
+        else:
+            raise ValueError(f"Unknown strategy {self.strategy}")
+    
+    def aggregate_evaluate(self, data_path:Path) -> Dict:
+        self.model.eval()
+        results = self.model.val(data=str(data_path), device=-1)
+        logging.info("Global Model Validation Complete")
+        logging.info("Global Evalution metrics: ")
+        logging.info(f"map  : {results.box.map}")
+        logging.info(f"map50: {results.box.map50}")
 
-    def get_parameters_for_client(self) -> OrderedDict:
-        return self.global_parameters
-
-    def aggregate_fit(self, new_parameters: List[OrderedDict], client_data_counts: List[int]):
-        assert len(new_parameters) == len(client_data_counts), \
-            "Parameter and data count lists must have the same length"
-
-        logging.info(f"Starting aggregation for round {self.training_round + 1} with {len(new_parameters)} client updates.")
-        total_data_count = sum(client_data_counts)
-
-        if total_data_count == 0:
-            logging.warning("Total data count is zero. Skipping aggregation.")
-            return
-
-        aggregated_state_dict = OrderedDict({k: torch.zeros_like(v) for k, v in new_parameters[0].items()})
-        
-        for i, client_state_dict in enumerate(new_parameters):
-            weight = client_data_counts[i] / total_data_count
-            for key in aggregated_state_dict.keys():
-                if aggregated_state_dict[key].dtype.is_floating_point:
-                    aggregated_state_dict[key] += client_state_dict[key] * weight
-                elif i == 0:
-                    aggregated_state_dict[key] = client_state_dict[key]
-
-        self.global_parameters = aggregated_state_dict
-        self.training_round += 1
-        logging.info(f"Aggregation complete. Global parameters updated for round {self.training_round}.")
-
-    def aggregate_evaluate(self, data_path: str):
-        logging.info(f"Evaluating aggregated model of round {self.training_round}...")
-
-        eval_model = YOLO(MODEL_NAME)
-        eval_model.model.load_state_dict(self.global_parameters, strict=False)
-        logging.info("Loaded global parameters into a temporary evaluation model.")
-
-        results = eval_model.val(
-            data=data_path,
-            save_json=True,
-            project="fed_yolo",
-            name=f"eval_round_{self.training_round}",
-            exist_ok=True,
-            device=-1,
-        )
-
-        logging.info("--- Global Model Validation Metrics ---")
-        logging.info(f"mAP (50-95): {results.box.map:.4f}")
-        logging.info(f"mAP (50):    {results.box.map50:.4f}")
-        logging.info(f"mAP (75):    {results.box.map75:.4f}")
-        logging.info("---------------------------------------")
-
-        return {
-            "round": self.training_round,
-            "map": results.box.map,
-            "map50": results.box.map50,
-            "map75": results.box.map75
+        metrics_dict = {
+            "map": float(results.box.map) if results.box.map is not None else 0.0,
+            "map50": float(results.box.map50) if results.box.map50 is not None else 0.0,
+            "map75": float(results.box.map75) if results.box.map75 is not None else 0.0,
+            "fitness": float(results.fitness) if hasattr(results, 'fitness') and results.fitness is not None else 0.0
         }
+        return metrics_dict
 
 app = Flask(__name__)
-model = YOLO(MODEL_NAME)
-data_path = Path(GLOBAL_DATA_PATH) / "data.yaml"
-pretrained_model = YOLO("yolov8n.pt")
-pretrained_state = pretrained_model.model.state_dict()
-custom_state = model.model.state_dict()
-filtered_state = {k: v for k, v in pretrained_state.items()
-                  if k in custom_state and v.shape == custom_state[k].shape}
-model.model.load_state_dict(filtered_state, strict=False)
-model.model.model[-1] = ultralytics.nn.modules.head.Detect(nc=8, ch=[64, 128, 256])
 
 @app.route("/get_parameters", methods=["GET"])
 def get_parameters():
-    parameters = fed_server.get_parameters_for_client()
+    parameters = server_app.get_parameters_for_clients()
     buffer = io.BytesIO()
     torch.save(parameters, buffer)
     buffer.seek(0)
-    return send_file(buffer, mimetype='application/octet-stream', as_attachment=True, download_name='global_model_params.pth')
+    return send_file(buffer, mimetype='application/octet-stream', as_attachment=True, download_name='global_model_parameters')
 
 @app.route("/submit_update", methods=["POST"])
 def submit_update():
     if 'model_file' not in request.files or 'data_count' not in request.form:
-        return jsonify({"error": "Missing model file or data count"}), 400
-
+        return jsonify({'error': 'missing model file or data count'}), 400
+    
     model_file = request.files['model_file']
     data_count = int(request.form['data_count'])
-    client_state_dict = torch.load(io.BytesIO(model_file.read()))
+    client_update = torch.load(io.BytesIO(model_file.read()))
 
-    fed_server.client_updates.append(client_state_dict)
-    fed_server.client_data_counts.append(data_count)
+    if server_app.strategy == "fedavg":
+        server_app.client_updates.append(client_update)
+    else:
+        sparse_update, masks = client_update
+        server_app.client_updates.append((sparse_update, masks))
+    server_app.client_data_counts.append(data_count)
 
-    logging.info(f"Received update. Total updates: {len(fed_server.client_updates)}/{fed_server.min_clients_for_aggregation}")
+    logging.info(f"Received update. Total updates: {len(server_app.client_updates)}/{server_app.min_clients_agg}")
 
-    if len(fed_server.client_updates) >= fed_server.min_clients_for_aggregation:
-        fed_server.aggregate_fit(fed_server.client_updates, fed_server.client_data_counts)
+    if len(server_app.client_updates) >= server_app.min_clients_agg:
+        server_app.aggregate_fit(server_app.client_updates, server_app.client_data_counts)
         eval_path = Path(GLOBAL_DATA_PATH) / "data.yaml"
-        metrics = fed_server.aggregate_evaluate(data_path=eval_path)
-        
-        fed_server.client_updates.clear()
-        fed_server.client_data_counts.clear()
-        logging.info("Round complete. Ready for next round.")
+        metrics = server_app.aggregate_evaluate(eval_path)
+        server_app.client_updates.clear()
+        server_app.client_data_counts.clear()
         return jsonify({"status": "Aggregation and evaluation complete", "metrics": metrics})
 
-    return jsonify({"status": f"Update received. Waiting for {fed_server.min_clients_for_aggregation - len(fed_server.client_updates)} more clients."})
+    return jsonify({"status": f"Update received. Waiting for more clients"})
 
 if __name__ == "__main__":
-    global_parameters = train_global_model(model=model, data_path=data_path, epochs=GLOBAL_EPOCHS)
-    fed_server = FedServer(min_clients_for_aggregation=CLIENTS, global_parameters=global_parameters)
+    model = YOLO(MODEL_PATH)
+    data_path = str(Path(GLOBAL_DATA_PATH) / "data.yaml")
+
+    logging.info("pretraining global model .....")
+    model = train_global_model(model, data_path, GLOBAL_EPOCHS)
+    logging.info("pretraining complete")
+
+    for name, param in model.named_parameters():
+        if isinstance(param, torch.nn.Parameter):
+            param.data = param.data.detach().clone().contiguous()
+            param.requires_grad_(True)
+
+    server_app = ServerApp(model=model, strategy=STRATEGY, min_clients=CLIENTS_COUNT)
     app.run(host=SERVER_HOST, port=SERVER_PORT, debug=False)

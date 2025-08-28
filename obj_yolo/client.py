@@ -3,35 +3,37 @@ import requests
 import torch
 import io
 import logging
-import os
 from ultralytics import YOLO
 from pathlib import Path
-from dotenv import load_dotenv
 import time
 
-# Load environment variables
-load_dotenv()
+# local imports
+from strategy import FedAvg, FedWeg
 
-# load configuration
-MODEL_NAME = os.getenv("MODEL_PATH", "yolo11n_baseline.yaml")
-SERVER_HOST = os.getenv("SERVER_HOST", "localhost")
-SERVER_PORT = int(os.getenv("SERVER_PORT", 5000))
-CLIENT_DATA_PATH = os.getenv("CLIENT_DATA_PATH", "./prepared_data/clients")
-LOCAL_EPOCHS = int(os.getenv("LOCAL_EPOCHS", 3))
-CLIENT_DATA_COUNT = int(os.getenv("CLIENT_DATA_COUNT", 100))
-CLIENTS = int(os.getenv("CLIENT_COUNT", 2))
+# import configuration
+from config import (
+    MODEL_PATH,
+
+    CLIENTS_COUNT,
+    CLIENT_DATA_COUNT,
+    CLIENT_EPOCHS,
+    CLIENT_DATA_PATH,
+
+    SERVER_HOST,
+    SERVER_PORT,
+    STRATEGY
+)
 
 # Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Client %(client_id)s] - %(message)s')
 
-class YoloClient:
+class ClientApp:
     def __init__(self, client_id: int):
         self.client_id = client_id
-        self.model = YOLO(MODEL_NAME)
+        self.model = YOLO(MODEL_PATH)
         self.server_url = f"http://{SERVER_HOST}:{SERVER_PORT}"
-        self.data_path = str(Path(CLIENT_DATA_PATH) / f"client_{self.client_id}" / "data.yaml")
-        self.logger = logging.getLogger(__name__)
-        self.log_adapter = logging.LoggerAdapter(self.logger, {'client_id': self.client_id})
+        self.data_path = Path(CLIENT_DATA_PATH) / f"client_{self.client_id}" / "data.yaml"
+        self.server_state = None
 
     def get_global_model(self):
         """
@@ -40,111 +42,70 @@ class YoloClient:
         if the number of classes differs.
         """
         try:
-            self.log_adapter.info("Requesting global model from server...")
+            logging.info("Requesting global model from server...")
             response = requests.get(f"{self.server_url}/get_parameters", timeout=60)
             response.raise_for_status()
 
             # Load the state_dict sent by the server
             params_buffer = io.BytesIO(response.content)
-            server_state_dict = torch.load(params_buffer)
+            self.server_state = torch.load(params_buffer)
 
-            # Get the client's current model state
-            client_state_dict = self.model.model.state_dict()
-
-            # Create a new state_dict to load, containing only matching layers
-            filtered_state_dict = {
-                k: v for k, v in server_state_dict.items()
-                if k in client_state_dict and v.shape == client_state_dict[k].shape
-            }
-
-            # Load the filtered state_dict. strict=False is safer.
-            self.model.model.load_state_dict(filtered_state_dict, strict=False)
-
-            num_loaded = len(filtered_state_dict)
-            num_total = len(server_state_dict)
-            if num_loaded < num_total:
-                self.log_adapter.warning(
-                    f"Mismatch detected. Loaded {num_loaded}/{num_total} layers from the server. "
-                    "This is expected if the number of classes differs."
-                )
-            else:
-                self.log_adapter.info("Successfully loaded all model layers from the server.")
+            # update model state dict directly
+            try:
+                self.model.load_state_dict(self.server_state, strict=False)
+            except Exception as e:
+                logging.error(f"could not adapt model: {e}")
 
         except requests.exceptions.RequestException as e:
-            self.log_adapter.error(f"Could not fetch model from server: {e}")
+            logging.error(f"Could not fetch model from server: {e}")
             raise
 
     def train(self):
         """Trains the model on the client's local data."""
         if not Path(self.data_path).exists():
-            self.log_adapter.error(f"Data path not found: {self.data_path}. Please check your config.")
+            logging.error(f"Data path not found: {self.data_path}. Please check your config.")
             return None
         
-        self.log_adapter.info(f"Starting local training for {LOCAL_EPOCHS} epochs.")
+        logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs.")
         
-        # The train function will automatically adapt the model head to the number
-        # of classes in self.data_path if it hasn't been adapted already.
-        self.model.train(
-            data=self.data_path,
-            epochs=LOCAL_EPOCHS,
-            batch=8,
-            save=False,
-            project="fed_yolo",
-            name=f"client_{self.client_id}_train",
-            exist_ok=True,
-            device=-1,
-            cos_lr=True,
-            warmup_epochs=3,
+        if STRATEGY == "fedavg":
+            logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs (FedAvg).")
+            client_state_dict = FedAvg.client_train(model=self.model, client_id=self.client_id, epochs=CLIENT_EPOCHS, data_path=self.data_path)
+            return client_state_dict
+        elif STRATEGY == "fedweg":
+            logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs (FedWeg).")
+            sparse_update, masks = FedWeg.client_train(self.model, self.server_state, self.client_id, CLIENT_EPOCHS, self.data_path)
+            return (sparse_update, masks)
+        else:
+            raise ValueError(f"Unknown strategy {STRATEGY}")
 
-            augment=True,
-            hsv_h=0.015,
-            hsv_s=0.7,
-            hsv_v=0.4,
-            degrees=0.0,
-            translate=0.1,
-            scale=0.5,
-            shear=0.0,
-            perspective=0.0,
-            flipud=0.0,
-            fliplr=0.5,
-            mosaic=1.0,
-            mixup=0.0,
-            copy_paste=0.0
-        )
-        
-        self.log_adapter.info("Local training complete.")
-        return self.model.model.state_dict()
-
-    def send_update(self, state_dict):
-        """Sends the updated model parameters to the server."""
-        if state_dict is None:
+    def send_update(self, update):
+        if update is None:
             return
-
-        self.log_adapter.info("Sending model update to the server...")
+        logging.info("Sending model update to the server...")
         buffer = io.BytesIO()
-        torch.save(state_dict, buffer)
+        torch.save(update, buffer)
         buffer.seek(0)
-        
         try:
             files = {'model_file': ('client_model.pth', buffer, 'application/octet-stream')}
             data = {'data_count': CLIENT_DATA_COUNT}
-            response = requests.post(f"{self.server_url}/submit_update", files=files, data=data, timeout=120)
+            response = requests.post(f"{self.server_url}/submit_update", files=files, data=data)
             response.raise_for_status()
-            self.log_adapter.info(f"Server response: {response.json()}")
+            logging.info(f"Server response: {response.json()}")
         except requests.exceptions.RequestException as e:
-            self.log_adapter.error(f"Failed to send update to server: {e}")
+            logging.error(f"Failed to send update to server: {e}")
 
 def run_single_client(client_id: int):
     """Simulates the full lifecycle of a single client."""
-    client = YoloClient(client_id=client_id)
+    client = ClientApp(client_id=client_id)
     client.get_global_model()
     updated_state_dict = client.train()
     client.send_update(updated_state_dict)
 
 if __name__ == "__main__":
-    print(f"\n--- Starting Simulation for {CLIENTS} Clients ---")
-    print("NOTE: Run server.py in a separate terminal before running the clients.")
-    for i in range(CLIENTS):
+    print(f"\n--- Starting Simulation for {CLIENTS_COUNT} Clients ---")
+    for i in range(CLIENTS_COUNT):
         print(f"\n--- Running Client {i} ---")
         run_single_client(i)
         time.sleep(2)
+        

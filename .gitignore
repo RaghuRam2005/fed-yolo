@@ -18,3 +18,7 @@ yolo11n.pt
 previous versions
 /obj_yolo/__pycache__/
 obj_yolo.egg-info
+
+# dataset folders
+base_data/
+prepared_data/

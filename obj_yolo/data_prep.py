@@ -3,21 +3,24 @@ from pathlib import Path
 import shutil
 import random
 import yaml
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# import configuration
+from config import (
+    BASE_DATA_PATH,
 
-# load configuration
-BASE_DATA_PATH = os.getenv("BASE_DATA_PATH", "./data")
-CLIENT_DATA_PATH = Path(os.getenv("CLIENT_DATA_PATH", "./prepared_data/clients"))
-GLOBAL_DATA_PATH = Path(os.getenv("GLOBAL_DATA_PATH", "./yolo_datasets/global_dataset"))
-CLIENT_DATA_COUNT = int(os.getenv("CLIENT_DATA_COUNT", 100))
-GLOBAL_DATA_COUNT = int(os.getenv("GLOBAL_DATA_COUNT", 100)) 
-CLIENTS = int(os.getenv("CLIENT_COUNT", 2))
-DATA_SPLIT = float(os.getenv("DATA_SPLIT", 0.8))
-NC = int(os.getenv("NC", 8))  # Number of classes
-CLASS_NAMES = ["Car", "Pedestrian", "Van", "Cyclist", "Truck", "Misc", "Tram", "Person_sitting"]
+    CLIENT_DATA_PATH,
+    CLIENT_DATA_COUNT,
+    CLIENTS_COUNT,
+
+    GLOBAL_DATA_PATH,
+    GLOBAL_DATA_COUNT,
+
+    NC,
+    CLASSES,
+
+    DATA_SPLIT
+)
+
 
 # Ensure the base data path exists
 if not BASE_DATA_PATH or not os.path.exists(BASE_DATA_PATH):
@@ -34,10 +37,10 @@ def write_yolo_yaml(dataset_path: Path):
                              (e.g., ./yolo_datasets/global_dataset).
     """
     yaml_content = { 
-        "train": f"{dataset_path}\images\train",  # path to training images
-        "val": f"{dataset_path}\images\val",      # path to validation images
+        "train": f"{dataset_path}\\images\\train",  # path to training images
+        "val": f"{dataset_path}\\images\\val",      # path to validation images
         "nc": NC,
-        "names": CLASS_NAMES,
+        "names": CLASSES,
     }
     
     yaml_file_path = dataset_path / "data.yaml"
@@ -102,7 +105,7 @@ def prepare_data(base_data_path: str) -> None:
 
     # --- Process Client Datasets ---
     print("\n--- Preparing Client Datasets ---")
-    for client_id in range(CLIENTS):
+    for client_id in range(CLIENTS_COUNT):
         client_path = CLIENT_DATA_PATH / f"client_{client_id}"
         
         # Get slices for this client
