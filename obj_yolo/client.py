@@ -89,7 +89,7 @@ class ClientApp:
         try:
             files = {'model_file': ('client_model.pth', buffer, 'application/octet-stream')}
             data = {'data_count': CLIENT_DATA_COUNT}
-            response = requests.post(f"{self.server_url}/submit_update", files=files, data=data, timeout=120)
+            response = requests.post(f"{self.server_url}/submit_update", files=files, data=data)
             response.raise_for_status()
             logging.info(f"Server response: {response.json()}")
         except requests.exceptions.RequestException as e:

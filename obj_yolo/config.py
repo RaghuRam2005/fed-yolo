@@ -11,7 +11,7 @@ GLOBAL_DATA_PATH = Path(os.path.join(BASE_REPO_DIR, "prepared_data"))
 # data path for client model train and val data
 CLIENT_DATA_PATH = Path(os.path.join(BASE_REPO_DIR, "prepared_data", "clients"))
 # model file path
-MODEL_PATH = Path(os.path.join(BASE_DATA_PATH, "yolo_config", "yolo11n.yaml"))
+MODEL_PATH = Path(os.path.join(BASE_REPO_DIR, "yolo_config", "yolo11n.yaml"))
 
 # data configurations
 DATA_SPLIT = 0.8
@@ -32,4 +32,4 @@ CLASSES = ["Car", "Pedestrian", "Van", "Cyclist", "Truck", "Misc", "Tram", "Pers
 # server configurations
 SERVER_HOST = "localhost"
 SERVER_PORT = 5000
-STRATEGY = "fedavg"
+STRATEGY = "fedweg"

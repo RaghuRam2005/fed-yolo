@@ -4,7 +4,7 @@ import os
 import torch
 import logging
 from collections import OrderedDict
-from typing import List
+from typing import List, Dict
 from flask import Flask, request, send_file, jsonify
 from ultralytics import YOLO
 from ultralytics.engine.model import Model, Results
@@ -16,23 +16,13 @@ from strategy import FedAvg, FedWeg
 # import configuration
 from config import (
     MODEL_PATH,
-
     CLIENTS_COUNT,
-
     GLOBAL_DATA_PATH,
     GLOBAL_EPOCHS,
-
     SERVER_HOST,
     SERVER_PORT,
     STRATEGY
 )
-MODEL_PATH = os.getenv("MODEL_PATH", "yolo11n_baseline.yaml")
-SERVER_HOST = os.getenv("SERVER_HOST", "localhost")
-SERVER_PORT = int(os.getenv("SERVER_PORT", 5000))
-CLIENTS = int(os.getenv("CLIENTS", 5))
-GLOBAL_EPOCHS = int(os.getenv("GLOBAL_EPOCHS", 5))
-GLOBAL_DATA_PATH = os.getenv("GLOBAL_DATA_PATH", ".\\yolo_datasets\\global_dataset")
-STRATEGY = os.getenv("STRATEGY", "fedavg")
 
 # check if global data path exists
 if not Path(GLOBAL_DATA_PATH).exists():
@@ -95,6 +85,18 @@ def train_global_model(model: Model, data_path: str, epochs: int = 3) -> List[to
 
     return model
 
+def clone_state_dict(state_dict):
+    """
+    Create a deep clone of state dict with detached, contiguous tensors
+    """
+    cloned_dict = {}
+    for k, v in state_dict.items():
+        if isinstance(v, torch.Tensor):
+            cloned_dict[k] = v.detach().clone().contiguous()
+        else:
+            cloned_dict[k] = v
+    return cloned_dict
+
 class ServerApp:
     def __init__(self, model:Model, strategy:str, min_clients:int):
         self.model = model
@@ -105,34 +107,45 @@ class ServerApp:
         self.client_masks = [] # only used in case of FedWeg algorithm
     
     def get_parameters_for_clients(self) -> OrderedDict:
-        return self.model.state_dict()
+        return clone_state_dict(self.model.state_dict())
 
     def aggregate_fit(self, client_updates, client_data_counts) -> None:
+        self.model.train()
         if self.strategy == "fedavg":
             aggregated = FedAvg.aggregate_fit(client_updates, client_data_counts)
-            self.model.load_state_dict(aggregated, strict=False)
+            cloned_aggregated = clone_state_dict(aggregated)
+            self.model.load_state_dict(cloned_aggregated, strict=False)
         elif self.strategy == "fedweg":
             sparse_updates, masks_list = zip(*client_updates)
             aggregated = FedWeg.aggregate_sparse_updates(
                 list(sparse_updates), list(masks_list), client_data_counts, self.model.state_dict()
             )
-            self.model.load_state_dict(aggregated, strict=False)
+            cloned_aggregated = clone_state_dict(aggregated)
+            self.model.load_state_dict(cloned_aggregated, strict=False)
         else:
             raise ValueError(f"Unknown strategy {self.strategy}")
     
-    def aggregate_evaluate(self, data_path:Path) -> Results:
+    def aggregate_evaluate(self, data_path:Path) -> Dict:
+        self.model.eval()
         results = self.model.val(data=str(data_path), device=-1)
         logging.info("Global Model Validation Complete")
         logging.info("Global Evalution metrics: ")
         logging.info(f"map  : {results.box.map}")
         logging.info(f"map50: {results.box.map50}")
-        return results
+
+        metrics_dict = {
+            "map": float(results.box.map) if results.box.map is not None else 0.0,
+            "map50": float(results.box.map50) if results.box.map50 is not None else 0.0,
+            "map75": float(results.box.map75) if results.box.map75 is not None else 0.0,
+            "fitness": float(results.fitness) if hasattr(results, 'fitness') and results.fitness is not None else 0.0
+        }
+        return metrics_dict
 
 app = Flask(__name__)
 
 @app.route("/get_parameters", methods=["GET"])
 def get_parameters():
-    parameters = ServerApp.get_parameters_for_clients()
+    parameters = server_app.get_parameters_for_clients()
     buffer = io.BytesIO()
     torch.save(parameters, buffer)
     buffer.seek(0)
@@ -147,21 +160,21 @@ def submit_update():
     data_count = int(request.form['data_count'])
     client_update = torch.load(io.BytesIO(model_file.read()))
 
-    if ServerApp.strategy == "fedavg":
-        ServerApp.client_updates.append(client_update)
-    else:  # fedweg returns tuple (sparse_update, masks)
+    if server_app.strategy == "fedavg":
+        server_app.client_updates.append(client_update)
+    else:
         sparse_update, masks = client_update
-        ServerApp.client_updates.append((sparse_update, masks))
-    ServerApp.client_data_counts.append(data_count)
+        server_app.client_updates.append((sparse_update, masks))
+    server_app.client_data_counts.append(data_count)
 
-    logging.info(f"Received update. Total updates: {len(ServerApp.client_updates)}/{ServerApp.min_clients_agg}")
+    logging.info(f"Received update. Total updates: {len(server_app.client_updates)}/{server_app.min_clients_agg}")
 
-    if len(ServerApp.client_updates) >= ServerApp.min_clients_agg:
-        ServerApp.aggregate_fit(ServerApp.client_updates, ServerApp.client_data_counts)
+    if len(server_app.client_updates) >= server_app.min_clients_agg:
+        server_app.aggregate_fit(server_app.client_updates, server_app.client_data_counts)
         eval_path = Path(GLOBAL_DATA_PATH) / "data.yaml"
-        metrics = ServerApp.aggregate_evaluate(eval_path)
-        ServerApp.client_updates.clear()
-        ServerApp.client_data_counts.clear()
+        metrics = server_app.aggregate_evaluate(eval_path)
+        server_app.client_updates.clear()
+        server_app.client_data_counts.clear()
         return jsonify({"status": "Aggregation and evaluation complete", "metrics": metrics})
 
     return jsonify({"status": f"Update received. Waiting for more clients"})
@@ -170,11 +183,14 @@ if __name__ == "__main__":
     model = YOLO(MODEL_PATH)
     data_path = str(Path(GLOBAL_DATA_PATH) / "data.yaml")
 
-    # pretrain global model
     logging.info("pretraining global model .....")
     model = train_global_model(model, data_path, GLOBAL_EPOCHS)
     logging.info("pretraining complete")
 
-    # start the server
-    ServerApp = ServerApp(model=model, strategy=STRATEGY, min_clients=CLIENTS_COUNT)
-    app.run(host=SERVER_HOST, port=SERVER_PORT, debug=True)
+    for name, param in model.named_parameters():
+        if isinstance(param, torch.nn.Parameter):
+            param.data = param.data.detach().clone().contiguous()
+            param.requires_grad_(True)
+
+    server_app = ServerApp(model=model, strategy=STRATEGY, min_clients=CLIENTS_COUNT)
+    app.run(host=SERVER_HOST, port=SERVER_PORT, debug=False)
