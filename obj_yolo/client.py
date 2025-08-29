@@ -13,15 +13,14 @@ from strategy import FedAvg, FedWeg
 # import configuration
 from config import (
     MODEL_PATH,
-
     CLIENTS_COUNT,
     CLIENT_DATA_COUNT,
     CLIENT_EPOCHS,
     CLIENT_DATA_PATH,
-
     SERVER_HOST,
     SERVER_PORT,
-    STRATEGY
+    STRATEGY,
+    COMMUNICATION_ROUNDS
 )
 
 # Setup basic logging
@@ -42,39 +41,69 @@ class ClientApp:
         if the number of classes differs.
         """
         try:
-            logging.info("Requesting global model from server...")
-            response = requests.get(f"{self.server_url}/get_parameters", timeout=60)
+            logging.info(f"Client {self.client_id}: Requesting global model from server...")
+            response = requests.get(f"{self.server_url}/get_parameters")
             response.raise_for_status()
-
+            
             # Load the state_dict sent by the server
             params_buffer = io.BytesIO(response.content)
             self.server_state = torch.load(params_buffer)
-
-            # update model state dict directly
+            
+            logging.info(f"Client {self.client_id}: Received server state with {len(self.server_state)} parameters")
+            
+            # Get current client model state for comparison
+            client_state_before = self.model.state_dict()
+            logging.info(f"Client {self.client_id}: Current client model has {len(client_state_before)} parameters")
+            
             try:
-                self.model.load_state_dict(self.server_state, strict=False)
+                # Load with strict=False to handle mismatched keys gracefully
+                missing_keys, unexpected_keys = self.model.load_state_dict(self.server_state, strict=False)
+                
+                # Log loading results
+                loaded_count = len(self.server_state) - len(missing_keys)
+                logging.info(f"Client {self.client_id}: Model state loading summary:")
+                logging.info(f"  - Successfully loaded: {loaded_count} parameters")
+                logging.info(f"  - Missing keys (not loaded): {len(missing_keys)}")
+                logging.info(f"  - Unexpected keys (ignored): {len(unexpected_keys)}")
+                
             except Exception as e:
-                logging.error(f"could not adapt model: {e}")
-
+                logging.error(f"Client {self.client_id}: Could not load server state into model: {e}")
+                logging.error(f"Client {self.client_id}: This may indicate severe model architecture mismatch")
+                raise
+                
         except requests.exceptions.RequestException as e:
-            logging.error(f"Could not fetch model from server: {e}")
+            logging.error(f"Client {self.client_id}: Could not fetch model from server: {e}")
             raise
 
-    def train(self):
+    def train(self, current_round: int = 1, total_rounds: int = 1):
         """Trains the model on the client's local data."""
         if not Path(self.data_path).exists():
             logging.error(f"Data path not found: {self.data_path}. Please check your config.")
             return None
-        
-        logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs.")
+
+        logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs (Round {current_round}/{total_rounds}).")
         
         if STRATEGY == "fedavg":
             logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs (FedAvg).")
-            client_state_dict = FedAvg.client_train(model=self.model, client_id=self.client_id, epochs=CLIENT_EPOCHS, data_path=self.data_path)
+            client_state_dict = FedAvg.client_train(
+                model=self.model, 
+                client_id=self.client_id, 
+                epochs=CLIENT_EPOCHS, 
+                data_path=self.data_path
+            )
             return client_state_dict
+            
         elif STRATEGY == "fedweg":
             logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs (FedWeg).")
-            sparse_update, masks = FedWeg.client_train(self.model, self.server_state, self.client_id, CLIENT_EPOCHS, self.data_path)
+            sparse_update, masks = FedWeg.client_train(
+                self.model, 
+                self.server_state, 
+                self.client_id, 
+                CLIENT_EPOCHS, 
+                self.data_path,
+                current_round=current_round,
+                total_rounds=total_rounds
+            )
             return (sparse_update, masks)
         else:
             raise ValueError(f"Unknown strategy {STRATEGY}")
@@ -82,10 +111,12 @@ class ClientApp:
     def send_update(self, update):
         if update is None:
             return
+            
         logging.info("Sending model update to the server...")
         buffer = io.BytesIO()
         torch.save(update, buffer)
         buffer.seek(0)
+        
         try:
             files = {'model_file': ('client_model.pth', buffer, 'application/octet-stream')}
             data = {'data_count': CLIENT_DATA_COUNT}
@@ -95,17 +126,40 @@ class ClientApp:
         except requests.exceptions.RequestException as e:
             logging.error(f"Failed to send update to server: {e}")
 
-def run_single_client(client_id: int):
-    """Simulates the full lifecycle of a single client."""
+def run_single_client(client_id: int, current_round: int, total_rounds: int):
+    """Simulates the full lifecycle of a single client for one communication round."""
     client = ClientApp(client_id=client_id)
+    
+    # Step 1: Request global model parameters from server
     client.get_global_model()
-    updated_state_dict = client.train()
-    client.send_update(updated_state_dict)
+    
+    # Step 2: Train locally with the global model
+    updated_artifacts = client.train(current_round=current_round, total_rounds=total_rounds)
+    
+    # Step 3: Send local updates to server
+    client.send_update(updated_artifacts)
+
+def run_federated_learning():
+    """Runs the complete federated learning process with multiple communication rounds."""
+    print(f"--- Starting Federated Learning with {CLIENTS_COUNT} clients for {COMMUNICATION_ROUNDS} rounds ---")
+    
+    for round_num in range(1, COMMUNICATION_ROUNDS + 1):
+        print(f"\n=== Communication Round {round_num}/{COMMUNICATION_ROUNDS} ===")
+        
+        # All clients participate in this round
+        for client_id in range(CLIENTS_COUNT):
+            print(f"\n--- Client {client_id} Training (Round {round_num}) ---")
+            run_single_client(
+                client_id=client_id, 
+                current_round=round_num, 
+                total_rounds=COMMUNICATION_ROUNDS
+            )
+            time.sleep(1)  # Small delay between clients
+        
+        print(f"\n--- Round {round_num} Complete - Server Aggregating Updates ---")
+        time.sleep(2)  # Wait for server aggregation to complete
+    
+    print(f"\n=== Federated Learning Complete! ({COMMUNICATION_ROUNDS} rounds finished) ===")
 
 if __name__ == "__main__":
-    print(f"\n--- Starting Simulation for {CLIENTS_COUNT} Clients ---")
-    for i in range(CLIENTS_COUNT):
-        print(f"\n--- Running Client {i} ---")
-        run_single_client(i)
-        time.sleep(2)
-        
+    run_federated_learning()

@@ -15,6 +15,7 @@ yolo11n.pt
 /obj_yolo/.env
 
 # miscellaneous
+.vscode
 previous versions
 /obj_yolo/__pycache__/
 obj_yolo.egg-info

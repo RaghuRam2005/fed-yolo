@@ -55,6 +55,7 @@ def train_global_model(model: Model, data_path: str, epochs: int = 3) -> List[to
         warmup_epochs=3,
         cos_lr=True,
         augment=True,
+        
         hsv_h=0.015,
         hsv_s=0.7,
         hsv_v=0.4,
@@ -110,6 +111,7 @@ class ServerApp:
         return clone_state_dict(self.model.state_dict())
 
     def aggregate_fit(self, client_updates, client_data_counts) -> None:
+        # Ensure model is in training mode for parameter updates
         self.model.train()
         if self.strategy == "fedavg":
             aggregated = FedAvg.aggregate_fit(client_updates, client_data_counts)
@@ -124,12 +126,35 @@ class ServerApp:
             self.model.load_state_dict(cloned_aggregated, strict=False)
         else:
             raise ValueError(f"Unknown strategy {self.strategy}")
-    
-    def aggregate_evaluate(self, data_path:Path) -> Dict:
+        
+        # Set model to eval mode after aggregation
         self.model.eval()
-        results = self.model.val(data=str(data_path), device=-1)
+        # Disable gradients for evaluation
+        for param in self.model.parameters():
+            param.requires_grad = False
+    
+    def aggregate_evaluate(self, data_path: Path) -> Dict:
+        """
+        Evaluate the aggregated model WITHOUT training
+        """
+        # Ensure model is in evaluation mode
+        self.model.eval()
+        
+        # Disable gradients completely during evaluation
+        with torch.no_grad():
+            # Use validation with minimal configuration to avoid training
+            results = self.model.val(
+                data=str(data_path), 
+                device=-1,
+                save=False,           # Don't save results
+                verbose=False,        # Reduce verbose output
+                project="fed_yolo",
+                name="federation_eval",
+                exist_ok=True
+            )
+        
         logging.info("Global Model Validation Complete")
-        logging.info("Global Evalution metrics: ")
+        logging.info("Global Evaluation metrics: ")
         logging.info(f"map  : {results.box.map}")
         logging.info(f"map50: {results.box.map50}")
 
@@ -139,12 +164,19 @@ class ServerApp:
             "map75": float(results.box.map75) if results.box.map75 is not None else 0.0,
             "fitness": float(results.fitness) if hasattr(results, 'fitness') and results.fitness is not None else 0.0
         }
+        
+        # Re-enable gradients for next round of federated learning
+        for param in self.model.parameters():
+            param.requires_grad = True
+            
         return metrics_dict
 
 app = Flask(__name__)
 
 @app.route("/get_parameters", methods=["GET"])
 def get_parameters():
+    # Ensure model is in eval mode when sending parameters
+    server_app.model.eval()
     parameters = server_app.get_parameters_for_clients()
     buffer = io.BytesIO()
     torch.save(parameters, buffer)
@@ -170,11 +202,18 @@ def submit_update():
     logging.info(f"Received update. Total updates: {len(server_app.client_updates)}/{server_app.min_clients_agg}")
 
     if len(server_app.client_updates) >= server_app.min_clients_agg:
+        logging.info("Starting aggregation...")
         server_app.aggregate_fit(server_app.client_updates, server_app.client_data_counts)
+        logging.info("Aggregation complete. Starting evaluation...")
+        
         eval_path = Path(GLOBAL_DATA_PATH) / "data.yaml"
         metrics = server_app.aggregate_evaluate(eval_path)
+        
+        # Clear updates for next round
         server_app.client_updates.clear()
         server_app.client_data_counts.clear()
+        
+        logging.info("Federation round complete.")
         return jsonify({"status": "Aggregation and evaluation complete", "metrics": metrics})
 
     return jsonify({"status": f"Update received. Waiting for more clients"})
@@ -187,10 +226,14 @@ if __name__ == "__main__":
     model = train_global_model(model, data_path, GLOBAL_EPOCHS)
     logging.info("pretraining complete")
 
+    # Ensure all parameters are properly set up for federated learning
     for name, param in model.named_parameters():
         if isinstance(param, torch.nn.Parameter):
             param.data = param.data.detach().clone().contiguous()
             param.requires_grad_(True)
 
+    # Set model to eval mode initially
+    model.eval()
+    
     server_app = ServerApp(model=model, strategy=STRATEGY, min_clients=CLIENTS_COUNT)
     app.run(host=SERVER_HOST, port=SERVER_PORT, debug=False)

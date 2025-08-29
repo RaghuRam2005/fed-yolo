@@ -1,5 +1,4 @@
 import os
-import logging
 from pathlib import Path
 
 BASE_REPO_DIR = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")).resolve()
@@ -10,6 +9,7 @@ BASE_DATA_PATH = Path(os.path.join(BASE_REPO_DIR, "base_data"))
 GLOBAL_DATA_PATH = Path(os.path.join(BASE_REPO_DIR, "prepared_data"))
 # data path for client model train and val data
 CLIENT_DATA_PATH = Path(os.path.join(BASE_REPO_DIR, "prepared_data", "clients"))
+
 # model file path
 MODEL_PATH = Path(os.path.join(BASE_REPO_DIR, "yolo_config", "yolo11n.yaml"))
 
@@ -24,6 +24,9 @@ GLOBAL_EPOCHS = 2
 CLIENTS_COUNT = 2
 CLIENT_DATA_COUNT = 100
 CLIENT_EPOCHS = 2
+
+# communication rounds configuration
+COMMUNICATION_ROUNDS = 3
 
 # classes configuations
 NC = 8
