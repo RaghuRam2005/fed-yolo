@@ -19,8 +19,7 @@ from config import (
     CLIENT_DATA_PATH,
     SERVER_HOST,
     SERVER_PORT,
-    STRATEGY,
-    COMMUNICATION_ROUNDS
+    STRATEGY
 )
 
 # Setup basic logging
@@ -75,13 +74,13 @@ class ClientApp:
             logging.error(f"Client {self.client_id}: Could not fetch model from server: {e}")
             raise
 
-    def train(self, current_round: int = 1, total_rounds: int = 1):
+    def train(self):
         """Trains the model on the client's local data."""
         if not Path(self.data_path).exists():
             logging.error(f"Data path not found: {self.data_path}. Please check your config.")
             return None
 
-        logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs (Round {current_round}/{total_rounds}).")
+        logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs.")
         
         if STRATEGY == "fedavg":
             logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs (FedAvg).")
@@ -95,16 +94,14 @@ class ClientApp:
             
         elif STRATEGY == "fedweg":
             logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs (FedWeg).")
-            sparse_update, masks = FedWeg.client_train(
+            pruned_state, sparsity_stats = FedWeg.client_train(
                 self.model, 
                 self.server_state, 
                 self.client_id, 
                 CLIENT_EPOCHS, 
                 self.data_path,
-                current_round=current_round,
-                total_rounds=total_rounds
             )
-            return (sparse_update, masks)
+            return (pruned_state, sparsity_stats)
         else:
             raise ValueError(f"Unknown strategy {STRATEGY}")
 
@@ -126,7 +123,7 @@ class ClientApp:
         except requests.exceptions.RequestException as e:
             logging.error(f"Failed to send update to server: {e}")
 
-def run_single_client(client_id: int, current_round: int, total_rounds: int):
+def run_single_client(client_id: int):
     """Simulates the full lifecycle of a single client for one communication round."""
     client = ClientApp(client_id=client_id)
     
@@ -134,32 +131,20 @@ def run_single_client(client_id: int, current_round: int, total_rounds: int):
     client.get_global_model()
     
     # Step 2: Train locally with the global model
-    updated_artifacts = client.train(current_round=current_round, total_rounds=total_rounds)
+    updated_artifacts = client.train()
     
     # Step 3: Send local updates to server
     client.send_update(updated_artifacts)
 
 def run_federated_learning():
     """Runs the complete federated learning process with multiple communication rounds."""
-    print(f"--- Starting Federated Learning with {CLIENTS_COUNT} clients for {COMMUNICATION_ROUNDS} rounds ---")
+    print(f"--- Starting Federated Learning with {CLIENTS_COUNT} clients")
+    for client_id in range(CLIENTS_COUNT):
+        print(f"\n--- Client {client_id} Training ---")
+        run_single_client(
+            client_id=client_id, 
+        )
+        time.sleep(1)  # Small delay between clients
     
-    for round_num in range(1, COMMUNICATION_ROUNDS + 1):
-        print(f"\n=== Communication Round {round_num}/{COMMUNICATION_ROUNDS} ===")
-        
-        # All clients participate in this round
-        for client_id in range(CLIENTS_COUNT):
-            print(f"\n--- Client {client_id} Training (Round {round_num}) ---")
-            run_single_client(
-                client_id=client_id, 
-                current_round=round_num, 
-                total_rounds=COMMUNICATION_ROUNDS
-            )
-            time.sleep(1)  # Small delay between clients
-        
-        print(f"\n--- Round {round_num} Complete - Server Aggregating Updates ---")
-        time.sleep(2)  # Wait for server aggregation to complete
-    
-    print(f"\n=== Federated Learning Complete! ({COMMUNICATION_ROUNDS} rounds finished) ===")
-
 if __name__ == "__main__":
     run_federated_learning()

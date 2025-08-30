@@ -1,3 +1,4 @@
+# strategy.py
 import torch
 import logging
 from collections import OrderedDict
@@ -138,8 +139,34 @@ class FedWeg:
             threshold (float): Threshold to return 
 
         Returns:
-            Dict[str, float]: _description_
+            Dict[str, float]: sparced parameters
         """
+        stats = {"total_params":0, "pruned_params":0, "bn_layers":0}
+
+        with torch.no_grad():
+            for name, module in model.named_modules():
+                if isinstance(module, torch.nn.BatchNorm2d) and hasattr(module, "weight"):
+                    stats["bn_layers"] += 1
+
+                    if module.weight is not None:
+                        # count total parameters
+                        stats["total_params"] += module.weight.numel()
+
+                        # apply magnitude based pruning
+                        weight_mask = module.weight.abs() > threshold
+                        pruned_count = (~weight_mask).sum().item()
+                        stats["pruned_params"] = pruned_count
+
+                        if module.bias is not None:
+                            module.bias *= weight_mask.float()
+                    
+                    logging.debug(f"Layer {name}: pruned {pruned_count}/{module.weight.numel()} weights")
+            
+        sparsity_ratio = stats["pruned_params"] / max(stats["total_params"], 1)
+        stats["sparsity_ratio"] = sparsity_ratio
+        
+        logging.info(f"Applied sparsification: {sparsity_ratio:.3f} sparsity across {stats['bn_layers']} BN layers")
+        return stats
 
     @staticmethod
     def client_train(
@@ -189,32 +216,30 @@ class FedWeg:
         if threshold is None or enable_adaptive_threshold:
             threshold = FedWeg._calculate_adaptive_threshold(model, sparsity_target)
         
-        sparsity_stats = FedWeg._apply_sparcification(model, threshold)
+        sparsity_stats = FedWeg._apply_sparsification(model, threshold)
 
-        pruned_state = OrderedDict()
-        # 3. Robust Sparse Update Creation with Defensive Key Access
-        with torch.no_grad():
-            for module in model.modules():
-                if isinstance(module, torch.nn.BatchNorm2d) and hasattr(module, "weight"):
-                    mask = module.weight.abs() > threshold
-                    module.weight *= mask
-                    if module.bias is not None:
-                        module.bias *= mask
+        try:
+            pruned_state = OrderedDict({k:v.clone() for k, v in model.state_dict().items()} )
+        except Exception as e:
+            logging.error(f"Client {client_id}: Failed to extract model state: {e}")
+            raise
 
-            pruned_state.update({k: v.clone() for k, v in model.state_dict().items()})
-
-        logging.info(f"Client {client_id} training complete")
+        logging.info(f"Client {client_id} training complete with {sparsity_stats['sparsity_ratio']:.3f} sparsity")
+        
+        # Safe callback removal
         try:
             model.remove_callback("on_loss_calculated")
+            logging.debug(f"Client {client_id}: Successfully removed L1 callback")
         except (AttributeError, KeyError) as e:
             logging.debug(f"Client {client_id}: Could not remove callback (this is normal): {e}")
         
-        return pruned_state
+        return pruned_state, sparsity_stats
 
     @staticmethod
     def aggregate_sparse_updates(base_params:OrderedDict,
                                  client_params_list:List[OrderedDict],
-                                 client_data_sizes:List[int]) -> OrderedDict:
+                                 client_data_sizes:List[int],
+                                 client_sparsity_stats:List[Dict[str, float]]) -> OrderedDict:
         """
         Aggregates sparse updates from clients using FedWeg Algorithm
 
@@ -222,37 +247,84 @@ class FedWeg:
             base_params (OrderedDict): server/global model before aggregation
             client_params_list (List[OrderedDict]): each client's pruned params
             client_data_sizes (List[int]): number of samples per client
+            client_sparsity_stats (List[Dict[str, float]]): sparsity statistics per client
 
         Returns:
             OrderedDict: aggregated params
         """
+        if not client_params_list:
+            logging.warning("No client updates provided, returning base parameters")
+            return base_params
+        
         assert len(client_params_list) == len(client_data_sizes), "updates size doesn't match"
-        total_data = sum(client_data_sizes)
+        
         aggregated = OrderedDict()
+        total_data = sum(client_data_sizes)
+        if total_data == 0:
+            raise ValueError("Total data size cannot be zero")
 
+        # iterate over each parameter
+        inverse_sparsity_weights = None
+        if client_sparsity_stats:
+            try:
+                sparsity_rates = [stats.get('sparsity_ratio', 0.0) for stats in client_sparsity_stats]
+                # Inverse sparsity weighting: less sparse models get higher weight
+                inverse_sparsity_weights = [(1.0 - s + 1e-6) for s in sparsity_rates]
+                total_inv_sparsity = sum(inverse_sparsity_weights)
+                inverse_sparsity_weights = [w / total_inv_sparsity for w in inverse_sparsity_weights]
+                logging.info(f"Using FedWeg inverse sparsity weighting: {inverse_sparsity_weights}")
+            except Exception as e:
+                logging.warning(f"Failed to calculate inverse sparsity weights: {e}, falling back to data-size weighting")
+                inverse_sparsity_weights = None
+        
         # iterate over each parameter
         for k in base_params.keys():
             agg_param = torch.zeros_like(base_params[k])
-            used = False
+            contributing_clients = 0
+            total_weight = 0.0
 
-            for client_params, n_i in zip(client_params_list, client_data_sizes):
-                if k in client_params.keys():
+            for i, (client_params, n_i) in enumerate(zip(client_params_list, client_data_sizes)):
+                try:
+                    if k not in client_params:
+                        logging.debug(f"Parameter {k} missing from client {i}, skipping")
+                        continue
+                    
                     client_val = client_params[k]
-                else:
+                    
+                    # Skip if parameter is all zeros (no contribution)
+                    if torch.count_nonzero(client_val) == 0:
+                        logging.debug(f"Parameter {k} from client {i} is all zeros, skipping")
+                        continue
+                    
+                    # Calculate weight: combine data size and inverse sparsity (FedWeg approach)
+                    if inverse_sparsity_weights:
+                        weight = (n_i / total_data) * inverse_sparsity_weights[i]
+                    else:
+                        weight = n_i / total_data
+                    
+                    agg_param += weight * client_val
+                    contributing_clients += 1
+                    total_weight += weight
+                    
+                except Exception as e:
+                    logging.error(f"Error processing parameter {k} from client {i}: {e}")
                     continue
-                
-                if torch.count_nonzero(client_val) == 0:
-                    continue
-                else:
-                    agg_param += (n_i / total_data) * client_val
-                    used = True
 
-            # if no client conributed use the base parameters:
-            if not used:
-                agg_param = base_params[k]
+            # Normalize by total contributing weight if needed
+            if contributing_clients > 0 and total_weight > 0:
+                if abs(total_weight - 1.0) > 1e-6:  # Renormalize if weights don't sum to 1
+                    agg_param /= total_weight
+                aggregated[k] = agg_param
+                logging.debug(f"Parameter {k}: aggregated from {contributing_clients} clients")
+            else:
+                # No client contributed - use base parameters (FedWeg fallback)
+                aggregated[k] = base_params[k].clone()
+                logging.debug(f"Parameter {k}: no contributions, using base value")
 
-            aggregated[k] = agg_param
+        if len(aggregated) != len(base_params):
+            logging.error(f"Aggregation size mismatch: {len(aggregated)} vs {len(base_params)}")
+            raise RuntimeError("Aggregation failed: parameter count mismatch")
         
-        assert len(aggregated) == len(base_params)
+        logging.info(f"Successfully aggregated parameters from {len(client_params_list)} clients")
         return aggregated
         

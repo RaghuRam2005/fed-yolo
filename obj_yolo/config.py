@@ -25,9 +25,6 @@ CLIENTS_COUNT = 2
 CLIENT_DATA_COUNT = 100
 CLIENT_EPOCHS = 2
 
-# communication rounds configuration
-COMMUNICATION_ROUNDS = 3
-
 # classes configuations
 NC = 8
 CLASSES = ["Car", "Pedestrian", "Van", "Cyclist", "Truck", "Misc", "Tram", "Person_sitting"]
