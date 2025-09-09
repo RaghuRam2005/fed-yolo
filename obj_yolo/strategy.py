@@ -1,134 +1,89 @@
+# strategy.py
 import random
-import numpy as np
-from typing import Optional, List, Dict, OrderedDict
+from typing import List, OrderedDict
 
 import torch
-from ultralytics import YOLO
 
-from utils import load_model, set_parameters
-from simulation import Simulation
-from client import ClientManager, ClientFitParams, FitRes
+from client import ClientManager, FitRes
 
 class Strategy:
-    def __init__(self, min_clients_aggregation:int=2):
+    """
+    Defines the logic for client selection and aggregation.
+    """
+    def __init__(self, min_clients_aggregation: int = 2):
+        if min_clients_aggregation < 1:
+            raise ValueError("min_clients_aggregation must be at least 1.")
         self.min_clients_aggregation = min_clients_aggregation
-    
+
     @staticmethod
-    def update_sparsity(manager:ClientManager) -> None:
+    def update_sparsity(manager: ClientManager) -> None:
         """
-        updates the sparsity of the clients everytime a new client is added
-        and also every time a communication round starts
+        Updates the client's sparsity parameter based on the number of rounds completed.
+        Sparsity increases as the training progresses.
 
         Args:
-            manager (ClientManager): Client Manager instance
+            manager (ClientManager): The client manager instance to update.
         """
         min_sparsity = 0.2
         max_sparsity = 0.9
         growth_rate = 0.05
 
-        # Base sparsity schedule: min_sparsity + growth_rate * rounds
         target = min_sparsity + growth_rate * manager.rounds_completed
-
-        # Ensure we stay within [min_sparsity, max_sparsity]
         new_sparsity = min(max(target, min_sparsity), max_sparsity)
-
         manager.fit_params.sparsity = new_sparsity
 
-
-    def sample(self, simulation:Simulation) -> List[int]:
+    def sample(self, available_clients: List[ClientManager]) -> List[ClientManager]:
         """
-        select required clients from all the clients available
+        Selects a random subset of clients for a training round.
 
         Args:
-            simulation (Simulation): Instance of simulation dataclass to know how many classes are available
+            available_clients (List[ClientManager]): The list of all clients managed by the server.
 
         Returns:
-            List[int]: List of selected clients
+            List[ClientManager]: A list of selected client managers.
         """
-        if simulation.num_supernodes < self.min_clients_aggregation:
-            raise Exception("Not enough clients in simulation")
-        clients = random.sample(range(simulation.num_supernodes), self.min_clients_aggregation)
-        return clients
-
-    def configure_fit(self, simulation:Simulation, global_state:Optional[OrderedDict]) -> List[ClientManager]:
-        """
-        Initializes client managers for selected clients.
-
-        Args:
-            simulation (Simulation): Simulation instance containing configuration and client info.
-            global_state (Optional[OrderedDict]): Optional global model state_dict to load into client models.
-
-        Returns:
-            List[ClientManager]: List of initialized ClientManager instances for selected clients.
-        """
-        managers = []
-        clients = self.sample(simulation)
-        for cid in clients:
-            model = YOLO(simulation.yolo_config)
-            if global_state is not None:
-                model.load_state_dict(global_state, strict=True)
-            fit_params = ClientFitParams()
-            managers.append(ClientManager(client_id=cid, fit_params=fit_params, model=model))
-        return managers
+        num_available = len(available_clients)
+        if num_available < self.min_clients_aggregation:
+            raise ValueError(
+                f"Not enough clients available ({num_available}) to meet the minimum "
+                f"aggregation requirement of {self.min_clients_aggregation}."
+            )
+        
+        num_to_sample = min(num_available, self.min_clients_aggregation)
+        return random.sample(available_clients, num_to_sample)
 
     def aggregate_fit(self, results: List[FitRes], global_state: OrderedDict) -> OrderedDict:
         """
-        Aggregates client model updates (deltas) into the global model state using inverse sparsity weighting.
-        BatchNorm running statistics are skipped during aggregation, as they are recalibrated locally on clients.
-
-        Args:
-            results (List[FitRes]): List of client training results, each containing model deltas and sparsity info.
-            global_state (OrderedDict): Current global model state_dict.
-
-        Returns:
-            OrderedDict: Updated global model state_dict after aggregation.
+        Aggregates client model updates (deltas) into the global model state
+        using inverse sparsity weighting.
         """
         if not results:
             return global_state
 
-        # Collect sparsities
         sparsities = [res.results.get("sparsity", 0.2) for res in results]
         inv_sparsities = [1.0 / s for s in sparsities]
         inv_sum = sum(inv_sparsities)
 
-        # Clone current global state
         agg_state = {k: v.clone() for k, v in global_state.items()}
 
-        def skip_bn_stat(key: str) -> bool:
-            return any(stat in key for stat in ["running_mean", "running_var", "num_batches_tracked"])
-        
-        # Iterate through each client's results
         for i, result in enumerate(results):
-            # Calculate the client's weight for this aggregation
             client_weight = inv_sparsities[i] / inv_sum
-            
-            # Aggregate backbone deltas
-            for key, delta_tensor in result.delta["backbone_delta"].items():
-                if skip_bn_stat(key):
-                    continue
-                if key in agg_state:
-                    agg_state[key] += client_weight * delta_tensor.to(agg_state[key].device)
-
-            # Aggregate head deltas
-            for key, delta_tensor in result.delta["head_delta"].items():
-                if skip_bn_stat(key):
-                    continue
-                if key in agg_state:
-                    agg_state[key] += client_weight * delta_tensor.to(agg_state[key].device)
+            for key, weight in agg_state.items():
+                if key in result.delta.keys():
+                    if key.endswith('bn.weight'):
+                        mask, params = result.delta[key]
+                        for idx, param in zip(mask, params):
+                            weight[idx] += client_weight * param
+                    else:
+                        delta_val = result.delta[key]
+                        # Handle integer vs float tensors
+                        if torch.is_floating_point(weight):
+                            weight += client_weight * delta_val
+                        else:
+                            # Just overwrite (for running stats, counters, etc.)
+                            weight.copy_(delta_val)
+                    agg_state[key] = weight
+                else:
+                    print(f"{key} not found in result.delta")
 
         return agg_state
-
-
-
-    def aggreate_evaluate(self, parameters:List[np.ndarray], data_path:str) -> Dict[str, int]:
-        """
-        Evaluates the YOLO model with aggregated parameters in the server
-        (this only happens if there is global data available in server)
-
-        Args:
-            parameters (List[np.ndarray]): List of aggregated parameters
-
-        Returns:
-            Dict[str, int]: results
-        """
-        pass

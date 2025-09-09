@@ -46,9 +46,9 @@ def load_data(
     random.shuffle(image_list)
 
     for image in image_list[:client_data_count]:
-        shutil.copy(base_i_path / image, client_i_path / "val" / image)
+        shutil.copy(base_i_path / image, client_i_path / "train" / image)
         label_file = image.replace(".png", ".txt") # Assign the new filename
-        shutil.copy(base_l_path / label_file, client_l_path / "val" / label_file)
+        shutil.copy(base_l_path / label_file, client_l_path / "train" / label_file)
     
     for image in image_list[client_data_count:client_data_count+50]:
         shutil.copy(base_i_path / image, client_i_path / "val" / image)

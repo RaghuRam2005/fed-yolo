@@ -1,58 +1,81 @@
 import logging
 import numpy as np
 from pathlib import Path
-from typing import Optional, List, Tuple, Dict, OrderedDict, Any
+from typing import Optional, List, Tuple, Dict
 
 import torch
 from torch import nn
+from torch.nn import Parameter
 
 from ultralytics import YOLO
 from ultralytics.engine.model import Model
 from ultralytics.engine.results import Results
 from ultralytics.engine.trainer import BaseTrainer
 
-def set_parameters(model: Model, parameters: List[np.ndarray]):
+def set_parameters(model: Model, parameters: Dict[str, Parameter], name: str = "Unnamed Model"):
     """
-    Set the model's parameters from a list of NumPy arrays,
-    excluding BatchNorm running statistics (running_mean, running_var, num_batches_tracked).
+    Set the model's parameters, with detailed logging for debugging.
     
     Args:
-        model (Model): YOLO model
-        parameters (List[np.ndarray]): List of parameter arrays matching model.state_dict() order
+        model (Model): YOLO model to update.
+        parameters (Dict[str, Parameter]): A dictionary of parameter tensors.
+        name (str): The name of the model being updated for clear logs.
     """
-    # Build state dict from given parameters
-    params_dict = zip(model.state_dict().keys(), parameters)
-    new_state_dict = OrderedDict()
+    # --- Start of new debug statements ---
+    logging.info(f"--- Updating parameters for '{name}' ---")
 
-    for k, v in params_dict:
-        if any(stat in k for stat in ["running_mean", "running_var", "num_batches_tracked"]):
-            # keep original BN buffers
-            new_state_dict[k] = model.state_dict()[k]
+    original_model_state = model.model.model.state_dict()
+    
+    target_keys = set(original_model_state.keys())
+    incoming_keys = set(parameters.keys())
+    
+    missing_keys = 0
+    mismatch_keys = 0
+
+    for key in target_keys:
+        if key not in incoming_keys:
+            missing_keys += 1
+            logging.warning(f"missing key found: {key}")
         else:
-            # update trainable params
-            new_state_dict[k] = torch.tensor(v, dtype=model.state_dict()[k].dtype)
+            if original_model_state[key].shape != parameters[key].shape:
+                mismatch_keys += 1
+                logging.warning(f"mismtach key found: {key}")
+                logging.warning(f"target key shape: {target_keys[key].shape}")
+                logging.warning(f"target key shape: {incoming_keys[key].shape}")
+    logging.info("------------------ SUMMARY -------------------- ")
+    logging.info(f"Total missing keys: {missing_keys}")
+    logging.info(f"Total shape mismatches: {mismatch_keys}")
 
-    # Load into model
-    model.load_state_dict(new_state_dict, strict=True)
+    # --- End of new debug statements ---
+
+    first_key = next(iter(parameters))
+    if first_key.startswith('model.model.'):
+        model.load_state_dict(parameters, strict=False)
+    elif first_key.startswith('model.'):
+        model.model.load_state_dict(parameters,strict=False)
+    else:
+        model.model.model.load_state_dict(parameters, strict=False)
+    
+    logging.info(f"--- Parameter update for '{name}' complete ---")
     return model
 
-def load_model(config:str) -> Optional[List[np.ndarray]]:
+def load_model(config:str) -> Dict[str, Parameter]:
     """
     Loads the model from the path specified
     if path is not specified load a pretrained model from ultralytics
 
     Returns:
-        Optional[List[np.ndarray]]: parameters of the model loaded
+        Dict[str, Parameters]: state_dict of the model loaded
     """
     model = None
     if Path(config).exists():
         model = YOLO(config)
     else:
-        model = YOLO("yolo11n.pt")
-    ndarray = get_whole_parameters(model)
-    return ndarray
+        model = YOLO("yolov11n.pt")
+    parameters = get_whole_parameters(model)
+    return parameters
 
-def get_whole_parameters(model:Model) -> Optional[List[np.ndarray]]:
+def get_whole_parameters(model:Model) -> Optional[Dict[str, Parameter]]:
     """
     Extracts the parameters from the model and gives in numpy format
 
@@ -60,74 +83,118 @@ def get_whole_parameters(model:Model) -> Optional[List[np.ndarray]]:
         model (Model): Instance of pytorch model
 
     Returns:
-        Optional[List[np.ndarray]]: List of model parameters
+        Optional[Dict[str, Parameter]]: List of model parameters
     """
-    return [val.cpu().numpy() for _, val in model.state_dict().items()]
+    cloned_dict = {k:v.clone() for k, v in model.model.model.state_dict().items()}
+    return cloned_dict
 
-def prune_and_make_mask(backbone: nn.Module, sparsity: float) -> Dict[str, torch.Tensor]:
-    """Computes a pruning mask based on the magnitudes of BatchNorm gamma parameters."""
-    if sparsity <= 0.0:
-        return {}
+def generate_mask(model:Model, sparsity:float) -> Dict[str, torch.Tensor]:    
+    """
+    Generates a mask for batch normalization weights in a model based on a specified sparsity level.
+    This function collects all batch normalization weights (identified by 'bn.weight' in their names),
+    computes their absolute values, and determines a threshold such that a given percentage (sparsity)
+    of weights are considered "inactive" (below the threshold). It then creates a mask for each batch
+    normalization weight tensor, where elements above the threshold are marked as True (active) and
+    those below as False (inactive).
 
-    gammas = [m.weight.data.abs().flatten() for m in backbone.modules() if isinstance(m, nn.BatchNorm2d) and hasattr(m, "weight")]
-    if not gammas:
-        return {}
+    Args:
+        model (Model): The model containing layers with batch normalization weights.
+        sparsity (float): The fraction (between 0 and 1) of weights to be masked out (set as inactive).
 
-    all_gammas = torch.cat(gammas)
-    q = min(max(float(sparsity), 0.0), 0.99)
-    threshold = torch.quantile(all_gammas, q).item()
-
-    mask_by_name: Dict[str, torch.Tensor] = {}
-    for name, module in backbone.named_modules():
-        if isinstance(module, nn.BatchNorm2d) and hasattr(module, "weight"):
-            mask = (module.weight.data.abs() > threshold).float()
-            mask_by_name[f"{name}.weight"] = mask.clone()
-            mask_by_name[f"{name}.bias"] = mask.clone()
-    return mask_by_name
-
-def apply_mask_to_backbone(backbone: nn.Module, mask_by_name: Dict[str, torch.Tensor]):
-    """Applies the pruning mask to the backbone's parameters."""
+    Returns:
+        Dict[str, torch.Tensor]: A dictionary mapping batch normalization weight parameter names to
+            boolean masks indicating which weights are above the sparsity threshold.
+    """
+    layers = model.model.model
+    scaling_factors = []
     with torch.no_grad():
-        for name, param in backbone.named_parameters():
-            if name in mask_by_name:
-                param.mul_(mask_by_name[name].to(param.device))
+        for key, weights in layers.named_parameters():
+            if key.endswith('bn.weight'):
+                scaling_factors.append(weights.abs())
+            
+        all_scaling_factors = torch.cat(scaling_factors)
+        threshold = np.percentile(all_scaling_factors.detach().numpy(), sparsity * 100)
 
-def export_sparse_delta(original_weights: OrderedDict, model: nn.Module, mask_by_name: Dict[str, torch.Tensor]):
+        mask = {}
+        for key, weights in layers.named_parameters():
+            if key.endswith('bn.weight'):
+                temp = (weights.abs() > threshold)
+                mask[key] = temp
+
+    return mask
+
+def apply_mask_to_model(delta:Dict[str, torch.Tensor], mask:Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     """
-    Compute masked deltas for backbone, dense deltas for head.
-    Skip BN running stats (they will be recomputed globally).
+    Apply a binary mask to a dictionary of parameter deltas, producing pruned (sparse) deltas.
+
+    Args:
+        delta (Dict[str, torch.Tensor]): Dictionary of parameter deltas to be masked.
+        mask (Dict[str, torch.Tensor]): Dictionary mapping parameter names to binary masks (torch.Tensor).
+
+    Returns:
+        Dict[str, torch.Tensor]: Dictionary mapping parameter names to masked (pruned) tensor values.
+
+    Notes:
+        - Only parameters with corresponding keys in the mask dictionary are masked.
+        - Masking is performed without gradient tracking (torch.no_grad()).
+        - The returned dictionary contains only the masked parameters.
     """
-    new_state = model.state_dict()
-    deltas = {k: new_state[k] - original_weights[k] for k in original_weights if k in new_state}
+    sparse_params = {}
 
-    delta = {"backbone_delta": {}, "head_delta": {}}
+    with torch.no_grad():
+        for key, weights in delta.items():
+            if key in mask.keys():
+                bool_mask = mask[key].type(weights.dtype)
+                pruned_weights = weights * bool_mask
+                sparse_params[key] = pruned_weights
+            else:
+                sparse_params[key] = weights
 
-    # Backbone: apply mask only to trainable BN params
-    backbone = model.model[:11]
-    for name, module in backbone.named_modules():
-        if isinstance(module, nn.BatchNorm2d):
-            weight_key = f"{name}.weight"
-            bias_key = f"{name}.bias"
+    return sparse_params
 
-            mask = mask_by_name.get(weight_key)
-            if mask is None:
-                continue
+def create_sparse_update(parameters:Dict[str, torch.Tensor]) -> Dict[str, Optional[Tuple]]:
+    """
+    Converts a dictionary of parameter tensors into a sparse representation.
 
-            if weight_key in deltas:
-                delta["backbone_delta"][weight_key] = deltas[weight_key] * mask
-            if bias_key in deltas:
-                delta["backbone_delta"][bias_key] = deltas[bias_key] * mask
+    For each parameter tensor, this function identifies non-zero elements and records their indices and values.
+    The result is a dictionary mapping each parameter name to a tuple containing:
+        - A list of indices where the tensor has non-zero values.
+        - A list of the corresponding non-zero values.
 
-            # skip running_mean and running_var (buffers)
+    Args:
+        parameters (Dict[str, torch.Tensor]): 
+            A dictionary where keys are parameter names and values are PyTorch tensors.
 
-    # Head: full dense deltas
-    head = model.model[11:]
-    for name, param in head.named_parameters():
-        if name in deltas:
-            delta["head_delta"][name] = deltas[name]
+    Returns:
+        Dict[str, Tuple]:
+            A dictionary mapping each parameter name to a tuple of (mask, sparse), where:
+                - mask (List[int]): Indices of non-zero elements in the tensor.
+                - sparse (List[float]): Values of the non-zero elements.
+    """
+    sparse_update = {}
+    for key, weights in parameters.items():
+        if key.endswith('bn.weight'):
+            # Vectorized sparse representation
+            nonzero_indices = (weights != 0).nonzero(as_tuple=True)[0].tolist()
+            nonzero_values = weights[nonzero_indices].cpu().tolist()
+            sparse_update[key] = (nonzero_indices, nonzero_values)
+        else:
+            sparse_update[key] = weights
+    return sparse_update
 
-    return delta
-
+def log_pruning_statistics(model: Model, mask: Dict[str, torch.Tensor]):
+    """Logs the statistics of the pruning mask to show which weights are zeroed out."""
+    logging.info("--- Pruning Statistics ---")
+    model_dict = model.model.model.state_dict()
+    
+    with torch.no_grad():
+        for key, bn_mask in mask.items():
+            if key in model_dict.keys():
+                logging.info(f"key: {key}")
+                logging.info(f"non zero parameters (True): {sum(v for v in bn_mask)}")
+                logging.info(f"non zero parameters (False): {sum(not v for v in bn_mask)}")
+            else:
+                logging.warning(f"key: {key} not found in model state dict")            
 
 class L1_BN_reg:
     """Applies L1 regularization to BatchNorm gamma parameters during training."""
@@ -135,11 +202,16 @@ class L1_BN_reg:
         self.lam = lam
 
     def __call__(self, trainer: BaseTrainer):
-        l1_penalty = torch.tensor(0.0, device=trainer.model.device)
-        for module in trainer.model.modules():
-            if isinstance(module, nn.BatchNorm2d) and hasattr(module, "weight") and module.weight is not None:
-                l1_penalty += torch.abs(module.weight).sum()
-        (self.lam * l1_penalty).backward()
+        l1_penalty = torch.tensor(0.0)
+        for key, weights in trainer.model.model.state_dict().items():
+            if key.endswith('bn.weight'):
+                l1_penalty += torch.abs(weights).sum()
+                weights += trainer.loss + (self.lam * l1_penalty)
+            trainer.model.model.state_dict()[key] = weights
+        # for module in trainer.model.modules():
+        #     if isinstance(module, nn.BatchNorm2d) and hasattr(module, "weight") and module.weight is not None:
+        #         l1_penalty += torch.abs(module.weight).sum()
+        # (self.lam * l1_penalty).backward()
 
 def on_train_start(trainer:BaseTrainer):
     """Initialize sparsity trainer and log initial parameters"""
@@ -152,29 +224,12 @@ def on_train_start(trainer:BaseTrainer):
     print(f"  Total parameters: {total_params:,}")
     print(f"  BatchNorm gamma parameters: {bn_params:,}")
 
-class on_train_end_pruning:
-    """Callback to prune the model's backbone at the end of training."""
-    def __init__(self, sparsity: float = 0.2):
-        self.sparsity = sparsity
-
-    def __call__(self, backbone:Model):
-        logging.info(f"Applying pruning with sparsity {self.sparsity:.3f}")
-        mask = prune_and_make_mask(backbone, self.sparsity)
-        return mask
-
-# def on_val_end(validator:BaseValidator):
-#     """ returns the loss acculated during the validation """
-#     if not losses:
-#         raise ValueError("No losses variable found while calling on_val_end")
-#     losses = validator.loss
-
-def yolo_train(model:Model, data_path:str, epochs:int, sparsity:float, lam:float) -> Tuple[Model, Results, List[int]]:
+def yolo_train(model:Model, data_path:str, epochs:int, sparsity:float, lam:float) -> Tuple[Dict[str, torch.tensor_split], Results, List[int]]:
     """YOLO model training function.""" 
-    prune_parameters = on_train_end_pruning(sparsity)
-    l1_loss_func = L1_BN_reg(lam)
+    l1_regularizer = L1_BN_reg(lam=lam)
 
     model.add_callback("on_train_start", on_train_start)
-    model.add_callback("optimizer_step", l1_loss_func)
+    model.add_callback("on_train_batch_end", l1_regularizer)
 
     results = model.train(
         data=data_path,
@@ -203,8 +258,11 @@ def yolo_train(model:Model, data_path:str, epochs:int, sparsity:float, lam:float
         mixup=0.0,
         copy_paste=0.0,
     )
-    backbone = model.model[:11]
-    mask = prune_parameters(backbone)
-    apply_mask_to_backbone(backbone)
+
+    # generate mask
+    mask = generate_mask(model=model, sparsity=sparsity)
+    
+    # Add the new logging call to show pruning results
+    log_pruning_statistics(model=model, mask=mask)
 
     return model, results, mask

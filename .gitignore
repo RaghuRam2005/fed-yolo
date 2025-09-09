@@ -1,6 +1,7 @@
 # result folder
 /fed_yolo
 /fed_yolo_res_1
+/fed_yolo_runs
 
 # data folder
 /data/
