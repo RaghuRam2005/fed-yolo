@@ -21,7 +21,6 @@ def set_parameters(model: Model, parameters: Dict[str, Parameter], name: str = "
         parameters (Dict[str, Parameter]): A dictionary of parameter tensors.
         name (str): The name of the model being updated for clear logs.
     """
-    # --- Start of new debug statements ---
     logging.info(f"--- Updating parameters for '{name}' ---")
 
     original_model_state = model.model.model.state_dict()
@@ -31,7 +30,7 @@ def set_parameters(model: Model, parameters: Dict[str, Parameter], name: str = "
     
     missing_keys = 0
     mismatch_keys = 0
-
+    
     for key in target_keys:
         if key not in incoming_keys:
             missing_keys += 1
@@ -45,8 +44,6 @@ def set_parameters(model: Model, parameters: Dict[str, Parameter], name: str = "
     logging.info("------------------ SUMMARY -------------------- ")
     logging.info(f"Total missing keys: {missing_keys}")
     logging.info(f"Total shape mismatches: {mismatch_keys}")
-
-    # --- End of new debug statements ---
 
     first_key = next(iter(parameters))
     if first_key.startswith('model.model.'):
@@ -113,7 +110,7 @@ def generate_mask(model:Model, sparsity:float) -> Dict[str, torch.Tensor]:
                 scaling_factors.append(weights.abs())
             
         all_scaling_factors = torch.cat(scaling_factors)
-        threshold = np.percentile(all_scaling_factors.detach().numpy(), sparsity * 100)
+        threshold = torch.quantile(all_scaling_factors.float(), sparsity)
 
         mask = {}
         for key, weights in layers.named_parameters():
@@ -196,40 +193,8 @@ def log_pruning_statistics(model: Model, mask: Dict[str, torch.Tensor]):
             else:
                 logging.warning(f"key: {key} not found in model state dict")            
 
-class L1_BN_reg:
-    """Applies L1 regularization to BatchNorm gamma parameters during training."""
-    def __init__(self, lam: float = 1e-5):
-        self.lam = lam
-
-    def __call__(self, trainer: BaseTrainer):
-        l1_penalty = torch.tensor(0.0)
-        for key, weights in trainer.model.model.state_dict().items():
-            if key.endswith('bn.weight'):
-                l1_penalty += torch.abs(weights).sum()
-                weights += trainer.loss + (self.lam * l1_penalty)
-            trainer.model.model.state_dict()[key] = weights
-        # for module in trainer.model.modules():
-        #     if isinstance(module, nn.BatchNorm2d) and hasattr(module, "weight") and module.weight is not None:
-        #         l1_penalty += torch.abs(module.weight).sum()
-        # (self.lam * l1_penalty).backward()
-
-def on_train_start(trainer:BaseTrainer):
-    """Initialize sparsity trainer and log initial parameters"""
-    backbone = trainer.model.model[:11]
-    total_params = sum(p.numel() for p in backbone.parameters())
-    bn_params = sum(m.weight.numel() for m in backbone.modules()
-                   if isinstance(m, nn.BatchNorm2d) and m.weight is not None)
-
-    print(f"Training started:")
-    print(f"  Total parameters: {total_params:,}")
-    print(f"  BatchNorm gamma parameters: {bn_params:,}")
-
-def yolo_train(model:Model, data_path:str, epochs:int, sparsity:float, lam:float) -> Tuple[Dict[str, torch.tensor_split], Results, List[int]]:
-    """YOLO model training function.""" 
-    l1_regularizer = L1_BN_reg(lam=lam)
-
-    model.add_callback("on_train_start", on_train_start)
-    model.add_callback("on_train_batch_end", l1_regularizer)
+def yolo_train(model:Model, data_path:str, epochs:int, sparsity:float) -> Tuple[Dict[str, torch.tensor_split], Results, List[int]]:
+    """YOLO model training function."""
 
     results = model.train(
         data=data_path,

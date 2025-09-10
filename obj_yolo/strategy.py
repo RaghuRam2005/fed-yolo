@@ -76,12 +76,12 @@ class Strategy:
                             weight[idx] += client_weight * param
                     else:
                         delta_val = result.delta[key]
-                        # Handle integer vs float tensors
+                        # Handle floating point vs. integer tensors correctly
                         if torch.is_floating_point(weight):
                             weight += client_weight * delta_val
                         else:
-                            # Just overwrite (for running stats, counters, etc.)
-                            weight.copy_(delta_val)
+                            # Handle integer tensors like num_batches_tracked
+                            weight += (client_weight * delta_val).round().long()
                     agg_state[key] = weight
                 else:
                     print(f"{key} not found in result.delta")

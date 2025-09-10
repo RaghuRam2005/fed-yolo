@@ -21,7 +21,6 @@ class SimulationConfig:
     num_clients: int = 3
     communication_rounds: int = 2
     epochs_per_round: int = 10
-    lam: float = 1e-3
     client_data_count: int = 1000
     min_clients_aggregation: int = 2
 
@@ -45,10 +44,9 @@ def setup_and_run(config: SimulationConfig):
     for i in range(config.num_clients):
         fit_params = ClientFitParams(
             epochs=config.epochs_per_round,
-            lam=config.lam
         )
-        # Each client gets an instance of the initial model structure
-        client_model = YOLO(config.yolo_config)
+        # Each client gets an instance of the initial model structure from a pre-trained model
+        client_model = YOLO(config.yolo_config).load("yolo11n.pt")
         client_manager = ClientManager(
             client_id=i,
             fit_params=fit_params,
@@ -76,7 +74,6 @@ if __name__ == "__main__":
         epochs_per_round=1,
         min_clients_aggregation=2,
         client_data_count=1000,
-        lam=1e-3,
     )
 
     logging.info("Starting the simulation with the following configuration:")

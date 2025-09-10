@@ -15,7 +15,6 @@ class ClientFitParams:
     """
     sparsity: float = 0.2
     epochs: int = 2
-    lam: float = 1e-5
 
 @dataclass
 class ClientManager:
@@ -66,21 +65,15 @@ class Client:
             model, data_path,
             self.client_manager.fit_params.epochs,
             self.client_manager.fit_params.sparsity,
-            self.client_manager.fit_params.lam
         )
         
-        # This is the fix for the KeyError
+        # Calculate the true delta (difference) for all parameters
         delta = {}
         with torch.no_grad():
             updated_state = model.model.model.state_dict()
             for key, weights in updated_state.items():
                 if key in original_state:
-                    if key.endswith(("running_mean", "running_var", "num_batches_tracked")):
-                        delta[key] = weights
-                    elif weights.shape == original_state[key].shape:
-                        delta[key] = weights - original_state[key]
-                    else:
-                        delta[key] = weights
+                    delta[key] = weights - original_state[key]
                 else:
                     delta[key] = weights
         
@@ -117,3 +110,4 @@ class Client:
             "map75": results.box.map75,
         }
         return metrics
+    
