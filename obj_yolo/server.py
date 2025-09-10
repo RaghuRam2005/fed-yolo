@@ -1,196 +1,135 @@
 # server.py
-import io
-import os
-import torch
 import logging
+import os
+import random
 from collections import OrderedDict
-from typing import List, Dict
-from flask import Flask, request, send_file, jsonify
+from typing import List
+
 from ultralytics import YOLO
-from ultralytics.engine.model import Model, Results
-from pathlib import Path
 
-# local imports
-from strategy import FedAvg, FedWeg
+from strategy import Strategy
+from client import Client, ClientManager, FitRes
+from dataset import load_data
+from utils import set_parameters, get_whole_parameters
 
-# import configuration
-from config import (
-    MODEL_PATH,
-    CLIENTS_COUNT,
-    GLOBAL_DATA_PATH,
-    GLOBAL_EPOCHS,
-    SERVER_HOST,
-    SERVER_PORT,
-    STRATEGY
-)
-
-# check if global data path exists
-if not Path(GLOBAL_DATA_PATH).exists():
-    raise Exception(f"Global data path {GLOBAL_DATA_PATH} does not exist. Please check your configuration.")
-
-is_available = torch.cuda.is_available()
-if is_available:
-    print(f"CUDA is available. Using GPU for training.")
-else:
-    print(f"CUDA is not available. Using CPU for training.")
-
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-def train_global_model(model: Model, data_path: str, epochs: int = 3) -> List[torch.nn.ParameterDict]:
+class Server:
     """
-    Trains the YOLO model using the custom dataset
+    The Server is the central orchestrator of the federated learning process.
     """
-    print("--------------------------------------------------------")
-    print("started training the global model")
-    model.train(
-        data=data_path,
-        epochs=epochs,
-        save=False,
-        project="fed_yolo",
-        name="server_pretrain",
-        exist_ok=True,
-        pretrained=True,
-        device=-1,
-        warmup_epochs=3,
-        cos_lr=True,
-        augment=True,
-        hsv_h=0.015,
-        hsv_s=0.7,
-        hsv_v=0.4,
-        degrees=0.0,
-        translate=0.1,
-        scale=0.5,
-        shear=0.0,
-        perspective=0.0,
-        flipud=0.0,
-        fliplr=0.5,
-        mosaic=1.0,
-        mixup=0.0,
-        copy_paste=0.0,
-        workers=0
-    )
-    print("global model training complete")
-    results = model.val(
-        save_json=True,
-        device=-1,
-        project="fed_yolo",
-        name="global_model",
-    )
-    print("----------------------------------------------------------")
-    print("global model validation metrics:")
-    print("mAP (50-95): ", results.box.map)
-    print("mAP (50)   : ", results.box.map50)
-    print("mAP (75)   : ", results.box.map75)
-
-    return model
-
-def clone_state_dict(state_dict):
-    """
-    Create a deep clone of state dict with detached, contiguous tensors
-    """
-    cloned_dict = {}
-    for k, v in state_dict.items():
-        if isinstance(v, torch.Tensor):
-            cloned_dict[k] = v.detach().clone().contiguous()
-        else:
-            cloned_dict[k] = v
-    return cloned_dict
-
-class ServerApp:
-    def __init__(self, model:Model, strategy:str, min_clients:int):
-        self.model = model
+    def __init__(self, strategy: Strategy, yolo_config: str, communication_rounds: int = 1):
         self.strategy = strategy
-        self.min_clients_agg = min_clients
-        self.client_updates = []
-        self.client_data_counts = []
-        self.client_masks = [] # only used in case of FedWeg algorithm
-    
-    def get_parameters_for_clients(self) -> OrderedDict:
-        return clone_state_dict(self.model.state_dict())
+        self.communication_rounds = communication_rounds
+        self.clients: List[ClientManager] = []
 
-    def aggregate_fit(self, client_updates, client_data_counts) -> None:
-        self.model.train()
-        if self.strategy == "fedavg":
-            aggregated = FedAvg.aggregate_fit(client_updates, client_data_counts)
-            cloned_aggregated = clone_state_dict(aggregated)
-            self.model.load_state_dict(cloned_aggregated, strict=False)
-        elif self.strategy == "fedweg":
-            sparse_updates, masks_list = zip(*client_updates)
-            aggregated = FedWeg.aggregate_sparse_updates(
-                list(sparse_updates), list(masks_list), client_data_counts, self.model.state_dict()
-            )
-            cloned_aggregated = clone_state_dict(aggregated)
-            self.model.load_state_dict(cloned_aggregated, strict=False)
-        else:
-            raise ValueError(f"Unknown strategy {self.strategy}")
-    
-    def aggregate_evaluate(self, data_path:Path) -> Dict:
-        self.model.eval()
-        results = self.model.val(data=str(data_path), device=-1)
-        logging.info("Global Model Validation Complete")
-        logging.info("Global Evalution metrics: ")
-        logging.info(f"map  : {results.box.map}")
-        logging.info(f"map50: {results.box.map50}")
+        self.global_model = YOLO(yolo_config).load("yolo11n.pt")
+        self.global_state = {k:v.clone() for k, v in self.global_model.model.model.state_dict().items()}
 
-        metrics_dict = {
-            "map": float(results.box.map) if results.box.map is not None else 0.0,
-            "map50": float(results.box.map50) if results.box.map50 is not None else 0.0,
-            "map75": float(results.box.map75) if results.box.map75 is not None else 0.0,
-            "fitness": float(results.fitness) if hasattr(results, 'fitness') and results.fitness is not None else 0.0
-        }
-        return metrics_dict
+    def add_client(self, client_manager: ClientManager) -> None:
+        self.clients.append(client_manager)
 
-app = Flask(__name__)
+    def update_global_state(self, new_state: OrderedDict) -> None:
+        """
+        Updates the global model's state dictionary.
+        """
+        self.global_model = set_parameters(
+            self.global_model,
+            new_state,
+            name="Global Server"
+        )
+        self.global_state = {k:v.clone() for k, v in self.global_model.model.model.state_dict().items()}
 
-@app.route("/get_parameters", methods=["GET"])
-def get_parameters():
-    parameters = server_app.get_parameters_for_clients()
-    buffer = io.BytesIO()
-    torch.save(parameters, buffer)
-    buffer.seek(0)
-    return send_file(buffer, mimetype='application/octet-stream', as_attachment=True, download_name='global_model_parameters')
+    def run(self, base_path: str, client_base_path: str, client_data_count: int) -> None:
+        """
+        Executes the entire federated learning process for the configured number of rounds.
+        """
+        logging.info("Starting federated learning process...")
 
-@app.route("/submit_update", methods=["POST"])
-def submit_update():
-    if 'model_file' not in request.files or 'data_count' not in request.form:
-        return jsonify({'error': 'missing model file or data count'}), 400
-    
-    model_file = request.files['model_file']
-    data_count = int(request.form['data_count'])
-    client_update = torch.load(io.BytesIO(model_file.read()))
+        # --- NEW: Centralized Data Partitioning ---
+        # 1. Get all image filenames from the base directory.
+        image_dir = os.path.join(base_path, "image_2")
+        all_images = os.listdir(image_dir)
+        random.shuffle(all_images)
 
-    if server_app.strategy == "fedavg":
-        server_app.client_updates.append(client_update)
-    else:
-        sparse_update, masks = client_update
-        server_app.client_updates.append((sparse_update, masks))
-    server_app.client_data_counts.append(data_count)
+        # 2. Create unique data partitions for each client.
+        client_partitions = {}
+        start_idx = 0
+        val_count = 50 # Number of validation samples per client
+        for client_manager in self.clients:
+            client_id = client_manager.client_id
+            end_idx = start_idx + client_data_count
+            
+            # Ensure we don't run out of images
+            if end_idx + val_count > len(all_images):
+                raise ValueError("Not enough images in the base dataset to partition among all clients.")
 
-    logging.info(f"Received update. Total updates: {len(server_app.client_updates)}/{server_app.min_clients_agg}")
+            train_split = all_images[start_idx:end_idx]
+            val_split = all_images[end_idx:end_idx + val_count]
+            client_partitions[client_id] = (train_split, val_split)
+            
+            # Move the index for the next client's partition
+            start_idx = end_idx + val_count
+        logging.info(f"Created {len(client_partitions)} unique data partitions.")
+        # --- END NEW SECTION ---
 
-    if len(server_app.client_updates) >= server_app.min_clients_agg:
-        server_app.aggregate_fit(server_app.client_updates, server_app.client_data_counts)
-        eval_path = Path(GLOBAL_DATA_PATH) / "data.yaml"
-        metrics = server_app.aggregate_evaluate(eval_path)
-        server_app.client_updates.clear()
-        server_app.client_data_counts.clear()
-        return jsonify({"status": "Aggregation and evaluation complete", "metrics": metrics})
+        for i in range(self.communication_rounds):
+            round_num = i + 1
+            logging.info(f"--- Starting Communication Round {round_num}/{self.communication_rounds} ---")
 
-    return jsonify({"status": f"Update received. Waiting for more clients"})
+            # 1. Client Selection
+            selected_clients = self.strategy.sample(available_clients=self.clients)
+            logging.info(f"Selected {len(selected_clients)} clients for this round: {[c.client_id for c in selected_clients]}")
 
-if __name__ == "__main__":
-    model = YOLO(MODEL_PATH)
-    data_path = str(Path(GLOBAL_DATA_PATH) / "data.yaml")
+            results: List[FitRes] = []
+            data_paths = {}
 
-    logging.info("pretraining global model .....")
-    model = train_global_model(model, data_path, GLOBAL_EPOCHS)
-    logging.info("pretraining complete")
+            # 2. Client Training
+            for client_manager in selected_clients:
+                # Update client model with the latest global state
+                client_fn = Client(client_manager=client_manager)
+                client_fn.update_client_model(parameters=self.global_state)
+                logging.info(f"Starting training for client {client_manager.client_id}")
 
-    for name, param in model.named_parameters():
-        if isinstance(param, torch.nn.Parameter):
-            param.data = param.data.detach().clone().contiguous()
-            param.requires_grad_(True)
+                # Get the client's unique file lists from the partition map
+                train_files, val_files = client_partitions[client_manager.client_id]
 
-    server_app = ServerApp(model=model, strategy=STRATEGY, min_clients=CLIENTS_COUNT)
-    app.run(host=SERVER_HOST, port=SERVER_PORT, debug=False)
+                data_path = load_data(
+                    base_path=base_path,
+                    client_base_path=client_base_path,
+                    client_id=client_manager.client_id,
+                    train_images=train_files, # Pass the unique training file list
+                    val_images=val_files    # Pass the unique validation file list
+                )
+                data_paths[client_manager.client_id] = data_path
+                logging.info(f"Prepared data for client {client_manager.client_id} at {data_path}")
+
+                res = client_fn.fit(data_path=str(data_path))
+                results.append(res)
+
+                logging.info(f"Client {client_manager.client_id} training complete. mAP50-95: {res.results['map50-95']:.4f}")
+
+            # 3. Aggregation
+            if not results:
+                logging.warning("No results to aggregate. Skipping round.")
+                continue
+
+            logging.info("Aggregation started.")
+            aggregated_state = self.strategy.aggregate_fit(results=results, global_state=self.global_state)
+            self.update_global_state(new_state=aggregated_state)
+            logging.info("Aggregation complete. Global model updated.")
+
+            # 4. Evaluation and State Update
+            for client_manager in selected_clients:
+                client_fn = Client(client_manager=client_manager)
+                data_path = data_paths[client_manager.client_id]
+
+                logging.info(f"Validation started for client {client_manager.client_id}")
+                val_res = client_fn.evaluate(paramaters=self.global_state, data_path=str(data_path))
+                logging.info(f"Validation results for client {client_manager.client_id}: mAP50-95: {val_res['mAP50-95']:.4f}")
+
+                # Update client state for the next round
+                client_fn.update_client_model(self.global_state)
+                client_manager.rounds_completed += 1
+                self.strategy.update_sparsity(manager=client_manager)
+                logging.info(f"Client {client_manager.client_id} sparsity for next round: {client_manager.fit_params.sparsity:.2f}")
+
+        logging.info("--- Federated learning process complete. ---")

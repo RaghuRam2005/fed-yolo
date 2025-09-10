@@ -1,111 +1,113 @@
 # client.py
-import requests
+import numpy as np
+from typing import List, Optional, Dict, Tuple
+from dataclasses import dataclass
+
 import torch
-import io
-import logging
-from ultralytics import YOLO
-from pathlib import Path
-import time
+from ultralytics.engine.model import Model
 
-# local imports
-from strategy import FedAvg, FedWeg
+from utils import yolo_train, set_parameters, apply_mask_to_model, create_sparse_update
 
-# import configuration
-from config import (
-    MODEL_PATH,
+@dataclass
+class ClientFitParams:
+    """
+    Data class to store client parameters for fitting.
+    """
+    sparsity: float = 0.2
+    epochs: int = 2
 
-    CLIENTS_COUNT,
-    CLIENT_DATA_COUNT,
-    CLIENT_EPOCHS,
-    CLIENT_DATA_PATH,
+@dataclass
+class ClientManager:
+    """
+    Data class to store client state and configuration.
+    """
+    client_id: int
+    fit_params: ClientFitParams
+    model: Model
+    rounds_completed: int = 0
 
-    SERVER_HOST,
-    SERVER_PORT,
-    STRATEGY
-)
+@dataclass
+class FitRes:
+    """
+    Data class for fit results from a client.
+    """
+    delta: Optional[Dict[str, Tuple]]
+    results: Dict[str, Optional[float]]
+    data_count: int = 1000
 
-# Setup basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Client %(client_id)s] - %(message)s')
+class Client:
+    """
+    Represents a single client in the federated learning setup.
+    It handles model training and evaluation on its local data.
+    """
+    def __init__(self, client_manager: ClientManager):
+        self.client_manager = client_manager
 
-class ClientApp:
-    def __init__(self, client_id: int):
-        self.client_id = client_id
-        self.model = YOLO(MODEL_PATH)
-        self.server_url = f"http://{SERVER_HOST}:{SERVER_PORT}"
-        self.data_path = Path(CLIENT_DATA_PATH) / f"client_{self.client_id}" / "data.yaml"
-        self.server_state = None
-
-    def get_global_model(self):
+    def update_client_model(self, parameters: List[np.ndarray]) -> None:
         """
-        Fetches the global model from the server and loads only the weights
-        for layers that have matching shapes, ignoring the final detection head
-        if the number of classes differs.
+        Updates the client's local model with new parameters.
         """
-        try:
-            logging.info("Requesting global model from server...")
-            response = requests.get(f"{self.server_url}/get_parameters", timeout=60)
-            response.raise_for_status()
+        self.client_manager.model = set_parameters(
+            model=self.client_manager.model,
+            parameters=parameters,
+            name=f"Client {self.client_manager.client_id}"  # Add descriptive name
+        )
 
-            # Load the state_dict sent by the server
-            params_buffer = io.BytesIO(response.content)
-            self.server_state = torch.load(params_buffer)
+    def fit(self, data_path: str) -> FitRes:
+        """
+        Trains the local model on the client's data.
+        """
+        model = self.client_manager.model
+        original_state = {k: v.clone() for k, v in model.model.model.state_dict().items()}
 
-            # update model state dict directly
-            try:
-                self.model.load_state_dict(self.server_state, strict=False)
-            except Exception as e:
-                logging.error(f"could not adapt model: {e}")
-
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Could not fetch model from server: {e}")
-            raise
-
-    def train(self):
-        """Trains the model on the client's local data."""
-        if not Path(self.data_path).exists():
-            logging.error(f"Data path not found: {self.data_path}. Please check your config.")
-            return None
+        # Train locally
+        model, results, mask = yolo_train(
+            model, data_path,
+            self.client_manager.fit_params.epochs,
+            self.client_manager.fit_params.sparsity,
+        )
         
-        logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs.")
+        # Calculate the true delta (difference) for all parameters
+        delta = {}
+        with torch.no_grad():
+            updated_state = model.model.model.state_dict()
+            for key, weights in updated_state.items():
+                if key in original_state:
+                    delta[key] = weights - original_state[key]
+                else:
+                    delta[key] = weights
         
-        if STRATEGY == "fedavg":
-            logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs (FedAvg).")
-            client_state_dict = FedAvg.client_train(model=self.model, client_id=self.client_id, epochs=CLIENT_EPOCHS, data_path=self.data_path)
-            return client_state_dict
-        elif STRATEGY == "fedweg":
-            logging.info(f"Starting local training for {CLIENT_EPOCHS} epochs (FedWeg).")
-            sparse_update, masks = FedWeg.client_train(self.model, self.server_state, self.client_id, CLIENT_EPOCHS, self.data_path)
-            return (sparse_update, masks)
-        else:
-            raise ValueError(f"Unknown strategy {STRATEGY}")
+        sparse_weights = apply_mask_to_model(delta, mask)
+        sparse_update = create_sparse_update(sparse_weights)
 
-    def send_update(self, update):
-        if update is None:
-            return
-        logging.info("Sending model update to the server...")
-        buffer = io.BytesIO()
-        torch.save(update, buffer)
-        buffer.seek(0)
-        try:
-            files = {'model_file': ('client_model.pth', buffer, 'application/octet-stream')}
-            data = {'data_count': CLIENT_DATA_COUNT}
-            response = requests.post(f"{self.server_url}/submit_update", files=files, data=data)
-            response.raise_for_status()
-            logging.info(f"Server response: {response.json()}")
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Failed to send update to server: {e}")
+        metrics = {
+            "map50-95": results.box.map,
+            "map50": results.box.map50,
+            "map75": results.box.map75,
+            "sparsity": self.client_manager.fit_params.sparsity,
+        }
 
-def run_single_client(client_id: int):
-    """Simulates the full lifecycle of a single client."""
-    client = ClientApp(client_id=client_id)
-    client.get_global_model()
-    updated_state_dict = client.train()
-    client.send_update(updated_state_dict)
+        return FitRes(delta=sparse_update, results=metrics)
 
-if __name__ == "__main__":
-    print(f"\n--- Starting Simulation for {CLIENTS_COUNT} Clients ---")
-    for i in range(CLIENTS_COUNT):
-        print(f"\n--- Running Client {i} ---")
-        run_single_client(i)
-        time.sleep(2)
-        
+    def evaluate(self, paramaters: List[np.ndarray], data_path: str) -> Dict[str, float]:
+        """
+        Evaluates the given model parameters on the client's local validation data.
+        """
+        model = set_parameters(
+            model=self.client_manager.model,
+            parameters=paramaters,
+            name=f"Client {self.client_manager.client_id} (pre-eval)" # Add descriptive name
+        )
+        results = model.val(
+            data=data_path,
+            save=False,
+            device=-1, # Use CPU for evaluation
+            verbose=False,
+        )
+        metrics = {
+            "mAP50-95": results.box.map,
+            "map50": results.box.map50,
+            "map75": results.box.map75,
+        }
+        return metrics
+    

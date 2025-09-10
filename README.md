@@ -1,12 +1,13 @@
 # Object Detection using YOLO and Federated Learning
 
-This project demonstrates object detection using the YOLO model (by Ultralytics) trained in a simulated federated learning environment with the KITTI dataset.
+This project showcases object detection using the Ultralytics YOLO model, trained in a simulated federated learning environment with the KITTI dataset.
 
 ## Overview
 
-- **YOLO Model:** State-of-the-art, real-time object detection.
-- **Federated Learning:** Training is distributed across multiple simulated clients.
+- **YOLO Model:** Real-time, state-of-the-art object detection.
+- **Federated Learning:** Distributed training across multiple simulated clients.
 - **Dataset:** KITTI dataset for 2D object detection.
+- **Sparse Training:** Implements FedWeg algorithm with client-side sparsity and inverse sparsity aggregation.
 
 ## Datasets
 
@@ -14,18 +15,20 @@ This project demonstrates object detection using the YOLO model (by Ultralytics)
 
 - **Images:** Download the left color images from the KITTI 2D object detection benchmark.
     - [KITTI Dataset Download](https://www.cvlibs.net/datasets/kitti/eval_object.php?obj_benchmark=2d)
-- **Note:** The official KITTI dataset only contains images.
+- **Note:** The official KITTI dataset contains only images.
 
 ### Labels
 
-- **Original Labels:** Provided on the KITTI website, but not in YOLO format.
-- **YOLO-formatted Labels:** Available on Kaggle for easier integration.
-    - [KITTI YOLO Labels on Kaggle](https://www.kaggle.com/datasets)
-    - Alternatively, you can convert the original labels to YOLO format using available scripts.
+- **Original Labels:** Available on the KITTI website (not in YOLO format).
+- **YOLO-formatted Labels:** Find pre-converted labels on [Kaggle](https://www.kaggle.com/datasets).
+
+## Algorithms
+
+- **FedWeg:** Introduces sparse training on clients and aggregates results using inverse sparsity, improving efficiency and security in federated learning scenarios.
 
 ## Getting Started
 
-Follow these steps to set up and run the project:
+To set up and run the project:
 
 1. **Clone the repository**
     ```bash
@@ -33,50 +36,29 @@ Follow these steps to set up and run the project:
     cd obj_yolo
     ```
 
-2. **Install the Python package manager [uv](https://docs.astral.sh/uv/getting-started/installation/)**
+2. **Install Python package manager [uv](https://docs.astral.sh/uv/getting-started/installation/)**
     - Follow the [official installation guide](https://docs.astral.sh/uv/getting-started/installation/).
 
-3. **Download the KITTI images and YOLO-formatted labels**
-    - Download KITTI images from the [official site](https://www.cvlibs.net/datasets/kitti/eval_object.php?obj_benchmark=2d).
-    - Download YOLO-formatted labels from [Kaggle](https://www.kaggle.com/datasets) or convert the original labels using available scripts.
+3. **Download KITTI images and YOLO-formatted labels**
+    - Get images from the [KITTI site](https://www.cvlibs.net/datasets/kitti/eval_object.php?obj_benchmark=2d).
+    - Download YOLO labels from [Kaggle](https://www.kaggle.com/datasets) or convert original labels using provided scripts.
 
-4. **Set up environment variables and folders**
-    - Copy `.env.example` to `.env` in the `obj_yolo` folder.
-    - Create any required folders as specified in `.env.example`.
-    - Update the paths in `.env` to match your local setup.
+4. **Set up folders**
+    - Extract images and labels into the same base directory.
 
-5. **Prepare the dataset (run once after downloading the data)**
+5. **Run the simulation**
     ```bash
-    uv run ./obj_yolo/data_prep.py
+    uv run ./obj_yolo/simulation.py
     ```
-
-6. **Start the federated learning server**
-    ```bash
-    uv run ./obj_yolo/server.py
-    ```
-
-7. **Run one or more clients (in separate terminals)**
-    ```bash
-    uv run ./obj_yolo/client.py
-    ```
-
-### Notes
-
-- on a GPU machine with cuda, we install cuda based pytorch using:
-
-```bash
-pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-```
-
-- then you can run the code using python instead of `uv`.
-
 
 ## References
 
-- [Ultralytics YOLO Documentation](https://docs.ultralytics.com/)
-- [KITTI Dataset](https://www.cvlibs.net/datasets/kitti/)
-- [Federated Learning Overview](https://en.wikipedia.org/wiki/Federated_learning)
+1. [Ultralytics YOLO Documentation](https://docs.ultralytics.com/)
+2. [KITTI Dataset](https://www.cvlibs.net/datasets/kitti/)
+3. [Federated Learning Wikipedia](https://en.wikipedia.org/wiki/Federated_learning)
+4. [Efficient and Secure Object Detection with Sparse Federated Training](https://doi.org/10.1109/TITS.2024.3389212)
+5. [Efficient CNNs through Network Slimming](https://doi.org/10.48550/arXiv.1708.06519)
 
 ---
 
-Feel free to contribute or open issues for improvements!
+Contributions and issues are welcome!
