@@ -72,7 +72,6 @@ class Client:
                 continue
             assert d_key in client_parameters.keys(), \
             f"delta key: {d_key} not found, client keys: {client_parameters.keys()}"
-
         sparse_weights = apply_mask_to_model(delta=delta, mask=mask)
 
         for s_key in sparse_weights.keys():

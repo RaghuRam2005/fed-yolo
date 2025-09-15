@@ -177,11 +177,5 @@ def set_parameters(model:Model, parameters:Dict[str, Tensor]) -> Model:
         model (Model): YOLO model to update.
         parameters (Dict[str, Parameter]): A dictionary of parameter tensors.
     """
-    model_state = model.model.model.state_dict()
-    for d_key in model_state.keys():
-        if d_key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-            continue
-        assert d_key in parameters.keys(), \
-        f"Set Parameters: model key {d_key} not found, p_keys: {parameters.keys()}"
     model.model.model.load_state_dict(parameters, strict=True)
     return model

@@ -22,14 +22,23 @@ if __name__ == "__main__":
     )
 
     base_path = os.path.dirname(os.path.abspath(__file__))
-    yolo_config = Path(base_path) / "yolo_config" / "yolo11.yaml"
+    yolo_config = Path(base_path) / "yolo_config" / "yolo11n.yaml"
     img_base_path = Path(base_path) / "base_data" / "training"
     client_base_path = Path(base_path) / "prepared_data" / "clients"
+    global_data_path = Path(base_path) / "prepared_data" / "data.yaml"
     model = YOLO(yolo_config)
     epochs = 1
     image_list = os.listdir(Path(img_base_path) / "image_2")
     client_data_count = 1000
     random.shuffle(image_list)
+
+    model.train(
+        epochs=1,
+        data=global_data_path,
+        project="fed_yolo",
+        name="global_train",
+        exist_ok=True,
+    )
 
     server = Server(
         communication_rounds=1,
@@ -39,6 +48,7 @@ if __name__ == "__main__":
     )
 
     clients = server.create_clients()
+    print(server.global_state.keys())
 
     completed_images = 0
     for i in range(server.communication_rounds):
@@ -49,7 +59,8 @@ if __name__ == "__main__":
         logging.info("-------------- client training started ------------")
         for client in clients:
             logging.info(f"------ client {client.client_id} ------")
-            client.model = server.global_model
+            client.model = YOLO(yolo_config)
+            client.update_model(parameters=server.global_state)
             train_list = image_list[completed_images:completed_images+client_data_count]
             completed_images += client_data_count
             val_list = image_list[completed_images:completed_images+100]
@@ -68,7 +79,7 @@ if __name__ == "__main__":
         logging.info("------------- Aggregation Completed ------------------- ")
         logging.info("updating global model state")
         server.global_model.model.model.load_state_dict(aggregate_state)
-        server.global_state = aggregate_state
+        server.global_state = server.global_model.model.model.state_dict()
         logging.info("global model updation complete")
         logging.info("------------------ CLIENT EVALUATION STARTED --------------- ")
         for client in clients:

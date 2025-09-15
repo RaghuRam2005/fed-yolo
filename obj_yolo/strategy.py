@@ -29,7 +29,6 @@ class Strategy():
         inv_sparcity = sum(inv_sparcities)
 
         agg_state = {k:v.clone() for k, v in global_state.items()}
-
         for i, result in enumerate(results):
             delta_w = inv_sparcities[i] / inv_sparcity
 
