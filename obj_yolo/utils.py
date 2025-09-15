@@ -1,91 +1,56 @@
+# utils.py
 import logging
-import numpy as np
-from pathlib import Path
-from typing import Optional, List, Tuple, Dict
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
 
 import torch
-from torch import nn
-from torch.nn import Parameter
+from torch import Tensor
+from torch.nn.modules.batchnorm import BatchNorm2d
 
-from ultralytics import YOLO
 from ultralytics.engine.model import Model
 from ultralytics.engine.results import Results
-from ultralytics.engine.trainer import BaseTrainer
 
-def set_parameters(model: Model, parameters: Dict[str, Parameter], name: str = "Unnamed Model"):
+@dataclass
+class ClientConfig:
     """
-    Set the model's parameters, with detailed logging for debugging.
-    
-    Args:
-        model (Model): YOLO model to update.
-        parameters (Dict[str, Parameter]): A dictionary of parameter tensors.
-        name (str): The name of the model being updated for clear logs.
+    Client Configuration data class
     """
-    logging.info(f"--- Updating parameters for '{name}' ---")
+    epochs:int=10
 
-    original_model_state = model.model.model.state_dict()
-    
-    target_keys = set(original_model_state.keys())
-    incoming_keys = set(parameters.keys())
-    
-    missing_keys = 0
-    mismatch_keys = 0
-    
-    for key in target_keys:
-        if key not in incoming_keys:
-            missing_keys += 1
-            logging.warning(f"missing key found: {key}")
-        else:
-            if original_model_state[key].shape != parameters[key].shape:
-                mismatch_keys += 1
-                logging.warning(f"mismtach key found: {key}")
-                logging.warning(f"target key shape: {target_keys[key].shape}")
-                logging.warning(f"target key shape: {incoming_keys[key].shape}")
-    logging.info("------------------ SUMMARY -------------------- ")
-    logging.info(f"Total missing keys: {missing_keys}")
-    logging.info(f"Total shape mismatches: {mismatch_keys}")
-
-    first_key = next(iter(parameters))
-    if first_key.startswith('model.model.'):
-        model.load_state_dict(parameters, strict=False)
-    elif first_key.startswith('model.'):
-        model.model.load_state_dict(parameters,strict=False)
-    else:
-        model.model.model.load_state_dict(parameters, strict=False)
-    
-    logging.info(f"--- Parameter update for '{name}' complete ---")
-    return model
-
-def load_model(config:str) -> Dict[str, Parameter]:
+@dataclass
+class ClientFitRes:
     """
-    Loads the model from the path specified
-    if path is not specified load a pretrained model from ultralytics
-
-    Returns:
-        Dict[str, Parameters]: state_dict of the model loaded
+    ClientFitRes is a data class representing the result of a client's fit operation.
     """
-    model = None
-    if Path(config).exists():
-        model = YOLO(config)
-    else:
-        model = YOLO("yolov11n.pt")
-    parameters = get_whole_parameters(model)
-    return parameters
+    delta:Dict[str, Optional[Tuple]]
+    metrics:Results
+    sparsity:float
+    datacount:int = 1000
 
-def get_whole_parameters(model:Model) -> Optional[Dict[str, Parameter]]:
-    """
-    Extracts the parameters from the model and gives in numpy format
+def client_train(model:Model, data_path:str, client_id:int, epochs:int) -> Results:
+    # training the local model
+    results = model.train(
+        data = data_path,
+        epochs=epochs,
+        device=-1,
+        batch=8,
+        imgsz=640,
+        save=False, # client doesn't have much storage
+        cache='disk',
+        project="fed_yolo",
+        name=f"client_{client_id}_train",
+        exist_ok=True,
+        pretrained="yolo11n.pt",
+        optimizer='auto',
+        seed=32,
+        deterministic=True,
+        freeze=0,
+        plots=True, # useful for verification
+    )
 
-    Args:
-        model (Model): Instance of pytorch model
+    return results
 
-    Returns:
-        Optional[Dict[str, Parameter]]: List of model parameters
-    """
-    cloned_dict = {k:v.clone() for k, v in model.model.model.state_dict().items()}
-    return cloned_dict
-
-def generate_mask(model:Model, sparsity:float) -> Dict[str, torch.Tensor]:    
+def generate_mask(model:Model, sparsity:float) -> Dict[str, Tensor]:
     """
     Generates a mask for batch normalization weights in a model based on a specified sparsity level.
     This function collects all batch normalization weights (identified by 'bn.weight' in their names),
@@ -104,23 +69,36 @@ def generate_mask(model:Model, sparsity:float) -> Dict[str, torch.Tensor]:
     """
     layers = model.model.model
     scaling_factors = []
+
     with torch.no_grad():
-        for key, weights in layers.named_parameters():
-            if key.endswith('bn.weight'):
-                scaling_factors.append(weights.abs())
-            
-        all_scaling_factors = torch.cat(scaling_factors)
-        threshold = torch.quantile(all_scaling_factors.float(), sparsity)
+        for _, module in layers.named_modules():
+            if isinstance(module, BatchNorm2d):
+                scaling_factors.append(module.weight.abs())
+
+        scaling_factors = torch.cat(scaling_factors)
+        threshold = torch.quantile(input=scaling_factors, q=sparsity)
 
         mask = {}
-        for key, weights in layers.named_parameters():
+        for key, weight in layers.named_parameters():
             if key.endswith('bn.weight'):
-                temp = (weights.abs() > threshold)
+                temp = (weight.abs() > threshold)
                 mask[key] = temp
-
+    
     return mask
 
-def apply_mask_to_model(delta:Dict[str, torch.Tensor], mask:Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+def log_pruning_statistics(model:Model, mask:Dict[str, Tensor]) -> None:
+    layers = model.model.model
+
+    logging.info("----------------- Pruning Statistics ------------------")
+    for key, _ in layers.named_parameters():
+        if key.endswith('bn.weight'):
+            inactive_params = (~mask[key]).sum().item()
+            active_params = mask[key].sum().item()
+            logging.info(f'Key              : {key}')
+            logging.info(f'Active Parameters: {active_params}')
+            logging.info(f'Inactive Params  : {inactive_params}')
+
+def apply_mask_to_model(delta:Dict[str, Tensor], mask:Dict[str, Tensor]) -> Dict[str, Tensor]:
     """
     Apply a binary mask to a dictionary of parameter deltas, producing pruned (sparse) deltas.
 
@@ -136,20 +114,28 @@ def apply_mask_to_model(delta:Dict[str, torch.Tensor], mask:Dict[str, torch.Tens
         - Masking is performed without gradient tracking (torch.no_grad()).
         - The returned dictionary contains only the masked parameters.
     """
-    sparse_params = {}
+    sparse_parameters = {}
 
-    with torch.no_grad():
-        for key, weights in delta.items():
-            if key in mask.keys():
-                bool_mask = mask[key].type(weights.dtype)
-                pruned_weights = weights * bool_mask
-                sparse_params[key] = pruned_weights
-            else:
-                sparse_params[key] = weights
+    for key, weights in delta.items():
+        if key.endswith('bn.weight') and key not in mask.keys():
+            raise Exception(f"Key {key} not found")
+        elif key.endswith('bn.weight') and key in mask.keys():
+            bool_mask = mask[key].type(weights.dtype)
+            assert(bool_mask.shape == weights.shape), f"Weights shape and mask shape doesn't match at {key}"
+            weights = (weights * bool_mask)
+        sparse_parameters[key] = weights
+    
+    assert delta.keys() == sparse_parameters.keys(), \
+        "Keys mismatch between delta and sparse parameters"
 
-    return sparse_params
+     # check consistency in value shapes
+    for key in delta.keys():
+        assert delta[key].shape == sparse_parameters[key].shape, \
+            f"Shape mismatch after masking at {key}: {delta[key].shape} vs {sparse_parameters[key].shape}"
+        
+    return sparse_parameters
 
-def create_sparse_update(parameters:Dict[str, torch.Tensor]) -> Dict[str, Optional[Tuple]]:
+def create_sparse_update(parameters:Dict[str, Tensor]) -> Dict[str, Optional[Tuple]]:
     """
     Converts a dictionary of parameter tensors into a sparse representation.
 
@@ -169,65 +155,33 @@ def create_sparse_update(parameters:Dict[str, torch.Tensor]) -> Dict[str, Option
                 - sparse (List[float]): Values of the non-zero elements.
     """
     sparse_update = {}
+
     for key, weights in parameters.items():
         if key.endswith('bn.weight'):
-            # Vectorized sparse representation
             nonzero_indices = (weights != 0).nonzero(as_tuple=True)[0].tolist()
             nonzero_values = weights[nonzero_indices].cpu().tolist()
             sparse_update[key] = (nonzero_indices, nonzero_values)
         else:
             sparse_update[key] = weights
+    
+    assert(sparse_update.keys() == parameters.keys()), \
+    "sparse update keys and the parameter keys do not match"
+
     return sparse_update
 
-def log_pruning_statistics(model: Model, mask: Dict[str, torch.Tensor]):
-    """Logs the statistics of the pruning mask to show which weights are zeroed out."""
-    logging.info("--- Pruning Statistics ---")
-    model_dict = model.model.model.state_dict()
+def set_parameters(model:Model, parameters:Dict[str, Tensor]) -> Model:
+    """
+    Set the model's parameters, with detailed logging for debugging.
     
-    with torch.no_grad():
-        for key, bn_mask in mask.items():
-            if key in model_dict.keys():
-                logging.info(f"key: {key}")
-                logging.info(f"non zero parameters (True): {sum(v for v in bn_mask)}")
-                logging.info(f"non zero parameters (False): {sum(not v for v in bn_mask)}")
-            else:
-                logging.warning(f"key: {key} not found in model state dict")            
-
-def yolo_train(model:Model, data_path:str, epochs:int, sparsity:float) -> Tuple[Dict[str, torch.tensor_split], Results, List[int]]:
-    """YOLO model training function."""
-
-    results = model.train(
-        data=data_path,
-        epochs=epochs,
-        batch=8,
-        save=False,
-        plots=False,
-        device=-1,
-        verbose=False,
-        project="fed_yolo_runs",
-        name=f"client_train",
-        exist_ok=True,
-        cos_lr=True,
-        augment=True,
-        hsv_h=0.015,
-        hsv_s=0.7,
-        hsv_v=0.4,
-        degrees=0.0,
-        translate=0.1,
-        scale=0.5,
-        shear=0.0,
-        perspective=0.0,
-        flipud=0.0,
-        fliplr=0.5,
-        mosaic=1.0,
-        mixup=0.0,
-        copy_paste=0.0,
-    )
-
-    # generate mask
-    mask = generate_mask(model=model, sparsity=sparsity)
-    
-    # Add the new logging call to show pruning results
-    log_pruning_statistics(model=model, mask=mask)
-
-    return model, results, mask
+    Args:
+        model (Model): YOLO model to update.
+        parameters (Dict[str, Parameter]): A dictionary of parameter tensors.
+    """
+    model_state = model.model.model.state_dict()
+    for d_key in model_state.keys():
+        if d_key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
+            continue
+        assert d_key in parameters.keys(), \
+        f"Set Parameters: model key {d_key} not found, p_keys: {parameters.keys()}"
+    model.model.model.load_state_dict(parameters, strict=True)
+    return model
