@@ -1,113 +1,103 @@
-# client.py
-import numpy as np
-from typing import List, Optional, Dict, Tuple
-from dataclasses import dataclass
+#client.py
+import os
 
-import torch
 from ultralytics.engine.model import Model
+from ultralytics.engine.results import Results
 
-from utils import yolo_train, set_parameters, apply_mask_to_model, create_sparse_update
+from .utils import (
+    ClientConfig,
+    ClientFitRes,
 
-@dataclass
-class ClientFitParams:
-    """
-    Data class to store client parameters for fitting.
-    """
-    sparsity: float = 0.2
-    epochs: int = 2
+    client_train,
 
-@dataclass
-class ClientManager:
-    """
-    Data class to store client state and configuration.
-    """
-    client_id: int
-    fit_params: ClientFitParams
-    model: Model
-    rounds_completed: int = 0
-
-@dataclass
-class FitRes:
-    """
-    Data class for fit results from a client.
-    """
-    delta: Optional[Dict[str, Tuple]]
-    results: Dict[str, Optional[float]]
-    data_count: int = 1000
+    generate_mask,
+    log_pruning_statistics,
+    apply_mask_to_model,
+    create_sparse_update
+)
 
 class Client:
-    """
-    Represents a single client in the federated learning setup.
-    It handles model training and evaluation on its local data.
-    """
-    def __init__(self, client_manager: ClientManager):
-        self.client_manager = client_manager
-
-    def update_client_model(self, parameters: List[np.ndarray]) -> None:
-        """
-        Updates the client's local model with new parameters.
-        """
-        self.client_manager.model = set_parameters(
-            model=self.client_manager.model,
-            parameters=parameters,
-            name=f"Client {self.client_manager.client_id}"  # Add descriptive name
-        )
-
-    def fit(self, data_path: str) -> FitRes:
-        """
-        Trains the local model on the client's data.
-        """
-        model = self.client_manager.model
-        original_state = {k: v.clone() for k, v in model.model.model.state_dict().items()}
-
-        # Train locally
-        model, results, mask = yolo_train(
-            model, data_path,
-            self.client_manager.fit_params.epochs,
-            self.client_manager.fit_params.sparsity,
-        )
-        
-        # Calculate the true delta (difference) for all parameters
-        delta = {}
-        with torch.no_grad():
-            updated_state = model.model.model.state_dict()
-            for key, weights in updated_state.items():
-                if key in original_state:
-                    delta[key] = weights - original_state[key]
-                else:
-                    delta[key] = weights
-        
-        sparse_weights = apply_mask_to_model(delta, mask)
-        sparse_update = create_sparse_update(sparse_weights)
-
-        metrics = {
-            "map50-95": results.box.map,
-            "map50": results.box.map50,
-            "map75": results.box.map75,
-            "sparsity": self.client_manager.fit_params.sparsity,
-        }
-
-        return FitRes(delta=sparse_update, results=metrics)
-
-    def evaluate(self, paramaters: List[np.ndarray], data_path: str) -> Dict[str, float]:
-        """
-        Evaluates the given model parameters on the client's local validation data.
-        """
-        model = set_parameters(
-            model=self.client_manager.model,
-            parameters=paramaters,
-            name=f"Client {self.client_manager.client_id} (pre-eval)" # Add descriptive name
-        )
-        results = model.val(
-            data=data_path,
-            save=False,
-            device=-1, # Use CPU for evaluation
-            verbose=False,
-        )
-        metrics = {
-            "mAP50-95": results.box.map,
-            "map50": results.box.map50,
-            "map75": results.box.map75,
-        }
-        return metrics
+    def __init__(self, client_id:int, sparsity:float):
+        self.client_id = client_id
+        self.sparsity = sparsity
+        self.model:Model = None
+        self.rounds_completed = 0
     
+    def set_model(self, model:Model):
+        self.model = model
+
+    def update_sparsity(self) -> None:
+        """
+        Updates the client's sparsity parameter based on the number of rounds completed.
+        Sparsity increases as the training progresses.
+        """
+        min_sparsity = 0.2
+        max_sparsity = 0.9
+        growth_rate = 0.05
+
+        target = min_sparsity + growth_rate * self.rounds_completed
+        new_sparsity = min(max(target, min_sparsity), max_sparsity)
+        self.sparsity = new_sparsity
+    
+    def fit(self, client_config:ClientConfig, data_path:str) -> ClientFitRes:
+        if not self.model:
+            raise AttributeError(f"client {self.client_id} model attribute is not set")
+        
+        client_parameters = self.model.model.model.state_dict()
+        
+        # training the local model
+        results = client_train(
+            model=self.model,
+            data_path=data_path,
+            client_id=self.client_id,
+            epochs=client_config.epochs,
+        )
+
+        mask = generate_mask(model=self.model, sparsity=self.sparsity)
+
+        log_pruning_statistics(model=self.model, mask=mask)
+
+        delta = {}
+        for key, weights in self.model.model.model.named_parameters():
+            if key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
+                delta[key] = weights
+            else:
+                delta[key] = client_parameters[key] - weights
+        
+        for d_key in delta.keys():
+            if d_key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
+                continue
+            assert d_key in client_parameters.keys(), \
+            f"delta key: {d_key} not found, client keys: {client_parameters.keys()}"
+
+        sparse_weights = apply_mask_to_model(delta=delta, mask=mask)
+
+        for s_key in sparse_weights.keys():
+            if s_key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
+                continue
+            assert s_key in client_parameters.keys(), \
+            f"sparse weight key: {s_key} not found, client keys: {client_parameters.keys()}"
+
+
+        sparse_update = create_sparse_update(parameters=sparse_weights)
+
+        assert(sparse_update.keys() == sparse_weights.keys()), \
+        "sparse update keys and sparse weight keys doesn't match"
+
+        client_res = ClientFitRes(delta=sparse_update, metrics=results, datacount=1000, sparsity=self.sparsity)
+
+        self.rounds_completed += 1
+        self.update_sparsity()
+
+        return client_res
+
+    def evaluate(self, data_path:str) -> Results:
+        metrics = self.model.val(
+            data=data_path,
+            save_json=True,
+            plots=True,
+            project="fed_yolo",
+            name=f"client_{self.client_id}_val",
+        )
+
+        return metrics
