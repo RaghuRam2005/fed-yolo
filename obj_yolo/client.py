@@ -1,6 +1,8 @@
 #client.py
 import os
+from typing import Dict
 
+from torch import Tensor
 from ultralytics.engine.model import Model
 from ultralytics.engine.results import Results
 
@@ -9,6 +11,7 @@ from .utils import (
     ClientFitRes,
 
     client_train,
+    set_parameters,
 
     generate_mask,
     log_pruning_statistics,
@@ -23,8 +26,8 @@ class Client:
         self.model:Model = None
         self.rounds_completed = 0
     
-    def set_model(self, model:Model):
-        self.model = model
+    def update_model(self, parameters:Dict[str, Tensor]):
+        self.model = set_parameters(model=self.model, parameters=parameters)
 
     def update_sparsity(self) -> None:
         """

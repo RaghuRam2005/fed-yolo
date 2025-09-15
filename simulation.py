@@ -72,7 +72,7 @@ if __name__ == "__main__":
         logging.info("global model updation complete")
         logging.info("------------------ CLIENT EVALUATION STARTED --------------- ")
         for client in clients:
-            client.model = server.global_model
+            client.update_model(parameters=server.global_state)
             metrics = client.evaluate(data_paths[client.client_id])
             logging.info(f"---------- Evaluation Client {client.client_id} ----------- ")
             logging.info(f"mAP 50-95: {metrics.box.map}")
