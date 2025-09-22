@@ -5,7 +5,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 from torch import Tensor
-from torch.nn.modules.batchnorm import BatchNorm2d
+from torch.nn.modules.batchnorm import _BatchNorm
 
 from ultralytics.engine.model import Model
 from ultralytics.engine.results import Results
@@ -72,7 +72,7 @@ def generate_mask(model:Model, sparsity:float) -> Dict[str, Tensor]:
 
     with torch.no_grad():
         for _, module in layers.named_modules():
-            if isinstance(module, BatchNorm2d):
+            if isinstance(module, _BatchNorm):
                 scaling_factors.append(module.weight.abs())
 
         scaling_factors = torch.cat(scaling_factors)
