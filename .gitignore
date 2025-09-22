@@ -2,6 +2,7 @@
 /fed_yolo
 /fed_yolo_res_1
 /fed_yolo_runs
+/runs
 
 # data folder
 /data/
@@ -21,6 +22,8 @@ yolo11n.pt
 previous versions
 /obj_yolo/__pycache__/
 obj_yolo.egg-info
+__pycache__
+uv.lock
 
 # dataset folders
 base_data/
