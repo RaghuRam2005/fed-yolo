@@ -1,93 +1,112 @@
 # simulation.py
 import os
 import logging
-import random
 from pathlib import Path
 
 from ultralytics import YOLO
 
-from obj_yolo import (
+from . import (
     Client,
     Server,
     Strategy,
-    load_data
+    weather_data_process,
+    scene_data_process,
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-if __name__ == "__main__":
+def run_experiment(experiment_type: str):
+    """
+    Runs a complete federated learning experiment for a given type ('weather' or 'scene').
+    """
+    logging.info(f"##################################################")
+    logging.info(f"##### STARTING EXPERIMENT: {experiment_type.upper()} #####")
+    logging.info(f"##################################################")
 
-    strategy = Strategy(
-        min_clients_for_aggregation=2
-    )
+    strategy = Strategy(min_clients_for_aggregation=2)
 
+    # --- Paths (Update these to your BDD100K dataset location) ---
     base_path = os.path.dirname(os.path.abspath(__file__))
-    yolo_config = Path(base_path) / "yolo_config" / "yolo11n.yaml"
-    img_base_path = Path(base_path) / "base_data" / "training"
+    yolo_config = Path(base_path) / "yolo_config" / "yolov8n.yaml"
+    
+    # BDD100K dataset paths
+    img_base_path = Path(base_path) / "base_data" / "bdd100k" / "images" / "100k"
+    label_base_path = Path(base_path) / "base_data" / "bdd100k" / "labels" / "100k"
+    
     client_base_path = Path(base_path) / "prepared_data" / "clients"
-    global_data_path = Path(base_path) / "prepared_data" / "data.yaml"
     model = YOLO(yolo_config)
-    epochs = 1
-    image_list = os.listdir(Path(img_base_path) / "image_2")
-    client_data_count = 1000
-    random.shuffle(image_list)
-
-    model.train(
-        epochs=1,
-        data=global_data_path,
-        project="fed_yolo",
-        name="global_train",
-        exist_ok=True,
-    )
+    
+    # --- Experiment Parameters ---
+    communication_rounds = 3
+    epochs_per_round = 1
+    client_data_count = 500  # Number of images per client
+    num_clients = 3
 
     server = Server(
-        communication_rounds=1,
+        communication_rounds=communication_rounds,
         model=model,
         strategy=strategy,
-        num_nodes=2
+        num_nodes=num_clients,
+        experiment_type=experiment_type
     )
 
     clients = server.create_clients()
-    print(server.global_state.keys())
+    logging.info(f"Created {len(clients)} clients with tags: {[c.tag for c in clients]}")
 
-    completed_images = 0
     for i in range(server.communication_rounds):
-        logging.info(f"------------------ Communication Round 1 --------------------")
-        configure_fit = server.strategy.configure_fit(epochs=epochs)
-        results = []
-        data_paths = []
-        logging.info("-------------- client training started ------------")
+        logging.info(f"------------------ Communication Round {i + 1}/{server.communication_rounds} --------------------")
+        
+        configure_fit = server.strategy.configure_fit(epochs=epochs_per_round)
+        fit_results = []
+        data_paths = {}
+
+        logging.info("-------------- Client Data Preparation & Training Started ------------")
         for client in clients:
-            logging.info(f"------ client {client.client_id} ------")
+            logging.info(f"------ Client {client.client_id} (Tag: {client.tag}) ------")
+            
+            data_path_loader = weather_data_process if experiment_type == "weather" else scene_data_process
+            data_path = data_path_loader(
+                base_img_path=img_base_path / "train",
+                base_label_path=label_base_path / "train",
+                client_id=client.client_id,
+                client_data_path=client_base_path,
+                weather_tag=client.tag,
+                scene_tag=client.tag,
+                count=client_data_count
+            )
+            data_paths[client.client_id] = data_path
+            
             client.model = YOLO(yolo_config)
             client.update_model(parameters=server.global_state)
-            train_list = image_list[completed_images:completed_images+client_data_count]
-            completed_images += client_data_count
-            val_list = image_list[completed_images:completed_images+100]
-            completed_images += 1
-            data_path = load_data(
-                base_path=img_base_path, 
-                client_base_path=client_base_path, 
-                client_id=client.client_id,
-                train_images=train_list,
-                val_images=val_list)
-            data_paths.append(data_path)
             result = client.fit(client_config=configure_fit, data_path=data_path)
-            results.append(result)
+            fit_results.append(result)
+
         logging.info("------------- Aggregation Started -------------------- ")
-        aggregate_state = server.strategy.aggregate_fit(global_state=server.global_state, results=results)
-        logging.info("------------- Aggregation Completed ------------------- ")
-        logging.info("updating global model state")
-        server.global_model.model.model.load_state_dict(aggregate_state)
+        aggregate_state = server.strategy.aggregate_fit(global_state=server.global_state, results=fit_results)
+        server.global_model.model.model.load_state_dict(aggregate_state, strict=False)
         server.global_state = server.global_model.model.model.state_dict()
-        logging.info("global model updation complete")
+        logging.info("------------- Aggregation & Global Model Update Completed ------------------- ")
+
         logging.info("------------------ CLIENT EVALUATION STARTED --------------- ")
+        evaluation_results = {}
         for client in clients:
             client.update_model(parameters=server.global_state)
             metrics = client.evaluate(data_paths[client.client_id])
-            logging.info(f"---------- Evaluation Client {client.client_id} ----------- ")
-            logging.info(f"mAP 50-95: {metrics.box.map}")
-            logging.info(f"mAP 50   : {metrics.box.map50}")
-            logging.info(f"mAP 75   : {metrics.box.map75}")
-        logging.info("---------------- CLIENT EVALUATION COMPLETE ----------------- ")
-    logging.info(" ----------------- FEDERATED LEARNING LOOP COMPLETE -------------------- ")
+            evaluation_results[client.client_id] = metrics
+            logging.info(f"--- Evaluation Client {client.client_id} (Tag: {client.tag}) --- mAP 50-95: {metrics.box.map:.4f} ---")
+        
+        logging.info("------------------ SPARSITY UPDATE STARTED ------------------")
+        client_ranks = server.strategy.position_clients(results=evaluation_results)
+        logging.info(f"Client Ranks (Higher mAP = Lower Rank): {client_ranks}")
+        for client in clients:
+            rank = client_ranks.get(client.client_id)
+            if rank is not None:
+                client.update_sparsity(rank=rank, num_clients=server.num_nodes)
+        logging.info("------------------ SPARSITY UPDATE COMPLETE -------------------")
+
+    logging.info(f" ----------------- FEDERATED LEARNING FOR '{experiment_type.upper()}' COMPLETE -------------------- ")
+
+if __name__ == "__main__":
+    # Run both experiments sequentially
+    run_experiment(experiment_type="weather")
+    run_experiment(experiment_type="scene")

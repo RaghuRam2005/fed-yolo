@@ -3,6 +3,7 @@ import numpy as np
 from typing import List, Dict
 
 from torch import Tensor
+from ultralytics.engine.results import Results
 
 from .utils import (
     ClientConfig,
@@ -18,46 +19,63 @@ class Strategy():
         return ClientConfig(epochs=epochs)
 
     def aggregate_fit(self, global_state:Dict[str, Tensor], results:List[ClientFitRes]) -> Dict[str, Tensor]:
-        assert (len(results) == self.min_clients_for_aggregation), \
-        f"Not enough or Excessive results than {self.min_clients_for_aggregation}"
+        assert (len(results) >= self.min_clients_for_aggregation), \
+        f"Not enough results for aggregation. Expected >= {self.min_clients_for_aggregation}, Got {len(results)}"
         
-        sparcities = []
-        for result in results:
-            sparcities.append(result.sparsity)
+        total_data = sum(res.datacount for res in results)
+        agg_state = {k: v.clone() * 0.0 for k, v in global_state.items()} # Initialize with zeros
+
+        # Perform weighted aggregation of model updates
+        for res in results:
+            weight = res.datacount / total_data
+            for key, value in res.delta.items():
+                if key not in agg_state: continue # Skip keys not in the global model
+
+                if isinstance(value, tuple) and key.endswith('bn.weight'):
+                    # Reconstruct dense tensor from sparse update
+                    indices, params = value
+                    update_tensor = agg_state[key].clone() # Use a zero tensor of the correct shape
+                    update_tensor[indices] = Tensor(params)
+                    agg_state[key] += update_tensor * weight
+                elif isinstance(value, Tensor):
+                    agg_state[key] += value * weight
         
-        inv_sparcities = [1.0 / s for s in sparcities]
-        inv_sparcity = sum(inv_sparcities)
+        # Apply the aggregated delta to the original global state
+        final_state = {k: v.clone() for k, v in global_state.items()}
+        for key, delta in agg_state.items():
+             if key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
+                continue
+             final_state[key] += delta
 
-        agg_state = {k:v.clone() for k, v in global_state.items()}
-        for i, result in enumerate(results):
-            delta_w = inv_sparcities[i] / inv_sparcity
+        return final_state
 
-            for d_key in result.delta.keys():
-                if d_key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-                    continue
-                assert d_key in agg_state.keys(), \
-                f"result key at index {i}, key: {d_key} not found , client keys: {agg_state.keys()}"
+    def position_clients(self, results:Dict[int, Results]) -> Dict[int, int]:
+        """
+        Ranks clients based on their evaluation metrics (mAP).
+        A higher mAP score results in a better (lower) rank.
 
-            for key, weight in agg_state.items():
-                if key.endswith('bn.weight'):
-                    new_weight = np.zeros_like(weight, dtype=float)
-                    ind, params = result.delta[key]
-                    p_ind = 0
-                    for j in ind:
-                        new_weight[j] = params[p_ind]
-                        p_ind += 1
-                    weight += (delta_w * new_weight)
-                    agg_state[key] = Tensor(weight)
-                elif key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-                    continue
-                else:
-                    weight += (delta_w * result.delta[key])
-                    agg_state[key] = Tensor(weight)
-            
-            for d_key in result.delta.keys():
-                if d_key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-                    continue
-                assert d_key in agg_state.keys(), \
-                f"After aggregation result key at index {i}, key: {d_key} not found , client keys: {agg_state.keys()}"
-        
-        return agg_state
+        Args:
+            results (Dict): Maps client_id to their evaluation metrics object.
+                            Example: {0: <Results object>, 1: <Results object>}
+
+        Returns:
+            Dict[int, int]: Maps each client_id to its rank (1-based).
+                            Example: {client_id_best: 1, client_id_worst: 2}
+        """
+        if not results:
+            return {}
+
+        client_scores = {
+            client_id: metrics.box.map
+            for client_id, metrics in results.items()
+        }
+
+        # Sort client_ids by score in descending order (higher mAP is better)
+        sorted_clients = sorted(client_scores.items(), key=lambda item: item[1], reverse=True)
+
+        # Assign ranks (1 is the best)
+        client_ranks = {
+            client_id: rank + 1
+            for rank, (client_id, _) in enumerate(sorted_clients)
+        }
+        return client_ranks
