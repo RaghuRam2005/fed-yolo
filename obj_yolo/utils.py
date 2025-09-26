@@ -1,14 +1,13 @@
 # utils.py
-import logging
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Optional, Dict, Tuple
 
 import torch
-from torch import Tensor
 from torch.nn.modules.batchnorm import _BatchNorm
 
 from ultralytics.engine.model import Model
 from ultralytics.engine.results import Results
+from ultralytics.utils.torch_utils import unwrap_model
 
 @dataclass
 class ClientConfig:
@@ -28,6 +27,16 @@ class ClientFitRes:
     datacount:int = 1000
 
 def client_train(model:Model, data_path:str, client_id:int, epochs:int) -> Results:
+    """
+    Trains a local YOLO model for a specific client using the provided dataset.
+    Args:
+        model (Model): The YOLO model instance to be trained.
+        data_path (str): Path to the training data.
+        client_id (int): Unique identifier for the client.
+        epochs (int): Number of training epochs.
+    Returns:
+        Results: Training results containing metrics and artifacts.
+    """
     # training the local model
     results = model.train(
         data = data_path,
@@ -50,132 +59,46 @@ def client_train(model:Model, data_path:str, client_id:int, epochs:int) -> Resul
 
     return results
 
-def generate_mask(model:Model, sparsity:float) -> Dict[str, Tensor]:
+def channel_index_masks(model:Model, tau:float) -> Dict[str, torch.Tensor]:
     """
-    Generates a mask for batch normalization weights in a model based on a specified sparsity level.
-    This function collects all batch normalization weights (identified by 'bn.weight' in their names),
-    computes their absolute values, and determines a threshold such that a given percentage (sparsity)
-    of weights are considered "inactive" (below the threshold). It then creates a mask for each batch
-    normalization weight tensor, where elements above the threshold are marked as True (active) and
-    those below as False (inactive).
+    Generates masks for the channel indices of BatchNorm layers in a model, 
+    selecting channels whose absolute weight values exceed a given threshold.
 
     Args:
-        model (Model): The model containing layers with batch normalization weights.
-        sparsity (float): The fraction (between 0 and 1) of weights to be masked out (set as inactive).
+        model (Model): The neural network model containing BatchNorm layers.
+        tau (float): Threshold value for selecting channels based on BatchNorm weights.
 
     Returns:
-        Dict[str, torch.Tensor]: A dictionary mapping batch normalization weight parameter names to
-            boolean masks indicating which weights are above the sparsity threshold.
+        Dict[str, torch.Tensor]: A dictionary mapping BatchNorm layer names to tensors 
+        containing the indices of channels whose absolute weights are greater than tau.
     """
-    layers = model.model.model
-    scaling_factors = []
+    bn = [(n, m) for n, m in unwrap_model(model).named_modules() if isinstance(m, _BatchNorm)]
+    return {n: (m.weight.abs() > tau).nonzero(as_tuple=False).squeeze(1).to(torch.int32) for n, m in bn}
 
-    with torch.no_grad():
-        for _, module in layers.named_modules():
-            if isinstance(module, _BatchNorm):
-                scaling_factors.append(module.weight.abs())
-
-        scaling_factors = torch.cat(scaling_factors)
-        threshold = torch.quantile(input=scaling_factors, q=sparsity)
-
-        mask = {}
-        for key, weight in layers.named_parameters():
-            if key.endswith('bn.weight'):
-                temp = (weight.abs() > threshold)
-                mask[key] = temp
-    
-    return mask
-
-def log_pruning_statistics(model:Model, mask:Dict[str, Tensor]) -> None:
-    layers = model.model.model
-
-    logging.info("----------------- Pruning Statistics ------------------")
-    for key, _ in layers.named_parameters():
-        if key.endswith('bn.weight'):
-            inactive_params = (~mask[key]).sum().item()
-            active_params = mask[key].sum().item()
-            logging.info(f'Key              : {key}')
-            logging.info(f'Active Parameters: {active_params}')
-            logging.info(f'Inactive Params  : {inactive_params}')
-
-def apply_mask_to_model(delta:Dict[str, Tensor], mask:Dict[str, Tensor]) -> Dict[str, Tensor]:
+def to_coo(t: torch.Tensor, tau:float) -> torch.Tensor:
     """
-    Apply a binary mask to a dictionary of parameter deltas, producing pruned (sparse) deltas.
+    Converts a dense tensor to a sparse COO tensor by thresholding absolute values.
 
     Args:
-        delta (Dict[str, torch.Tensor]): Dictionary of parameter deltas to be masked.
-        mask (Dict[str, torch.Tensor]): Dictionary mapping parameter names to binary masks (torch.Tensor).
+        t (torch.Tensor): The input dense tensor.
+        tau (float): Threshold value; elements with absolute value greater than tau are kept.
 
     Returns:
-        Dict[str, torch.Tensor]: Dictionary mapping parameter names to masked (pruned) tensor values.
-
-    Notes:
-        - Only parameters with corresponding keys in the mask dictionary are masked.
-        - Masking is performed without gradient tracking (torch.no_grad()).
-        - The returned dictionary contains only the masked parameters.
+        torch.Tensor: A sparse COO tensor containing only the elements of `t` whose absolute value exceeds `tau`.
     """
-    sparse_parameters = {}
+    m = t.abs() > tau
+    idx = m.nonzero(as_tuple=False).T
+    vals = t[m].float()
+    return torch.sparse_coo_tensor(idx, vals, size=t.shape).coalesce()
 
-    for key, weights in delta.items():
-        if key.endswith('bn.weight') and key not in mask.keys():
-            raise Exception(f"Key {key} not found")
-        elif key.endswith('bn.weight') and key in mask.keys():
-            bool_mask = mask[key].type(weights.dtype)
-            assert(bool_mask.shape == weights.shape), f"Weights shape and mask shape doesn't match at {key}"
-            weights = (weights * bool_mask)
-        sparse_parameters[key] = weights
-    
-    assert delta.keys() == sparse_parameters.keys(), \
-        "Keys mismatch between delta and sparse parameters"
-
-     # check consistency in value shapes
-    for key in delta.keys():
-        assert delta[key].shape == sparse_parameters[key].shape, \
-            f"Shape mismatch after masking at {key}: {delta[key].shape} vs {sparse_parameters[key].shape}"
-        
-    return sparse_parameters
-
-def create_sparse_update(parameters:Dict[str, Tensor]) -> Dict[str, Optional[Tuple]]:
+def from_coo(s: torch.Tensor) -> torch.Tensor:
     """
-    Converts a dictionary of parameter tensors into a sparse representation.
-
-    For each parameter tensor, this function identifies non-zero elements and records their indices and values.
-    The result is a dictionary mapping each parameter name to a tuple containing:
-        - A list of indices where the tensor has non-zero values.
-        - A list of the corresponding non-zero values.
+    Converts a sparse COO tensor to a dense tensor.
 
     Args:
-        parameters (Dict[str, torch.Tensor]): 
-            A dictionary where keys are parameter names and values are PyTorch tensors.
+        s (torch.Tensor): A sparse tensor in COO format.
 
     Returns:
-        Dict[str, Tuple]:
-            A dictionary mapping each parameter name to a tuple of (mask, sparse), where:
-                - mask (List[int]): Indices of non-zero elements in the tensor.
-                - sparse (List[float]): Values of the non-zero elements.
+        torch.Tensor: The dense representation of the input tensor.
     """
-    sparse_update = {}
-
-    for key, weights in parameters.items():
-        if key.endswith('bn.weight'):
-            nonzero_indices = (weights != 0).nonzero(as_tuple=True)[0].tolist()
-            nonzero_values = weights[nonzero_indices].cpu().tolist()
-            sparse_update[key] = (nonzero_indices, nonzero_values)
-        else:
-            sparse_update[key] = weights
-    
-    assert(sparse_update.keys() == parameters.keys()), \
-    "sparse update keys and the parameter keys do not match"
-
-    return sparse_update
-
-def set_parameters(model:Model, parameters:Dict[str, Tensor]) -> Model:
-    """
-    Set the model's parameters, with detailed logging for debugging.
-    
-    Args:
-        model (Model): YOLO model to update.
-        parameters (Dict[str, Parameter]): A dictionary of parameter tensors.
-    """
-    model.model.model.load_state_dict(parameters, strict=True)
-    return model
+    return s.to_dense()

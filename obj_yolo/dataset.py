@@ -5,16 +5,16 @@ import shutil
 import yaml
 import json
 import random
+import logging
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Any, Tuple
+from multiprocessing import Pool, cpu_count
 from PIL import Image
-from sklearn.model_selection import train_test_split
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 def load_data_kitti(
         base_path:str,
         client_base_path:str,
-        client_id:str,
+        client_id:int,
         train_images: List[str],
         val_images: List[str]) -> Path:
     """
@@ -24,7 +24,7 @@ def load_data_kitti(
     Args:
         base_path (str): base path that contains images and labals
         client_base_path (str): base path for clients data
-        client_id (str): id of the client
+        client_id (int): id of the client
         train_images (List[str]): List of image filenames for the training set.
         val_images (List[str]): List of image filenames for the validation set.
 
@@ -81,128 +81,226 @@ def load_data_kitti(
         yaml.dump(content, f, sort_keys=True)
     return yaml_path
 
-# YOLO class names
+# YOLO class mapping for BDD100K
 YOLO_CLASSES = ["bus", "light", "sign", "person", "bike", "truck", "motor", "car", "train", "rider"]
 CLASS2ID = {name: i for i, name in enumerate(YOLO_CLASSES)}
 
-def _get_or_create_attribute_index(base_label_path: Path, index_file_path: Path) -> Dict:
-    """
-    Loads the attribute index from a file, or creates it if it doesn't exist.
-    The index maps attributes (like 'weather' or 'scene') and their values
-    to a list of corresponding label filenames. This provides a significant speedup.
-    """
-    if index_file_path.exists():
-        print("✅ Loading existing metadata index.")
-        with open(index_file_path, "r", encoding="utf-8") as f:
-            return json.load(f)
 
-    print("⏳ Creating new metadata index. This might take a moment...")
-    index = {"weather": {}, "scene": {}}
-    for label_file in base_label_path.glob("*.json"):
-        with open(label_file, "r", encoding="utf-8") as f:
-            try:
-                data = json.load(f)
-                attrs = data.get("attributes", {})
-                weather = attrs.get("weather")
-                scene = attrs.get("scene")
-                if weather:
-                    index["weather"].setdefault(weather, []).append(label_file.name)
-                if scene:
-                    index["scene"].setdefault(scene, []).append(label_file.name)
-            except json.JSONDecodeError:
-                print(f"⚠️ Warning: Could not decode JSON from {label_file.name}")
-                continue
-    
-    with open(index_file_path, "w", encoding="utf-8") as f:
-        json.dump(index, f, indent=2)
-    print(f"✅ Metadata index created and saved to {index_file_path}")
-    return index
+# ----------------------------
+# 1. MULTI-FILE VERSION
+# ----------------------------
+def _process_label_file(file_path: Path) -> Tuple[Dict, Dict]:
+    weather_dict = {}
+    scene_dict = {}
 
-def _process_single_file(img_file, lbl_file, split_label_dir, split_img_dir):
-    """
-    Convert a single image + label pair into YOLO format.
-    """
     try:
-        with Image.open(img_file) as im:
-            w, h = im.size
-
-        yolo_txt = split_label_dir / f"{img_file.stem}.txt"
-        with open(lbl_file, "r", encoding="utf-8") as f:
+        with open(file_path, "r") as f:
             data = json.load(f)
-
-        with open(yolo_txt, "w", encoding="utf-8") as out:
-            for obj in data.get("labels", []):
-                category = obj.get("category")
-                if category not in CLASS2ID: continue
-                class_id = CLASS2ID[category]
-                if "box2d" not in obj: continue
-
-                x1, y1, x2, y2 = obj["box2d"]["x1"], obj["box2d"]["y1"], obj["box2d"]["x2"], obj["box2d"]["y2"]
-                x_center, y_center = ((x1 + x2) / 2) / w, ((y1 + y2) / 2) / h
-                width, height = (x2 - x1) / w, (y2 - y1) / h
-                out.write(f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n")
-
-        shutil.copy(img_file, split_img_dir / img_file.name)
     except Exception as e:
-        print(f"❌ Error processing {img_file}: {e}")
+        logging.warning(f"Skipping {file_path.name} due to error: {e}")
+        return weather_dict, scene_dict
 
-def _prepare_yolo_dataset(base_img_path, base_label_path, client_id, client_data_path,
-                          filter_key, filter_value, count):
-    """
-    Internal function to prepare YOLO dataset. Uses a pre-computed index for speed.
-    """
-    output_dir = Path(client_data_path) / f"client_{client_id}"
-    yaml_path = output_dir / "data.yaml"
+    img_name = data.get("name")
+    attributes = data.get("attributes", {})
+    weather = attributes.get("weather", "unknown")
+    scene = attributes.get("scene", "unknown")
 
-    base_img_path, base_label_path = Path(base_img_path), Path(base_label_path)
-    
-    # --- OPTIMIZATION: Use metadata index ---
-    index_file = base_label_path.parent / "metadata_index.json"
-    metadata_index = _get_or_create_attribute_index(base_label_path, index_file)
-    
-    try:
-        label_filenames = metadata_index[filter_key][filter_value]
-    except KeyError:
-        raise ValueError(f"No matches found for {filter_key}={filter_value} in the index.")
-    
-    matched = [(base_img_path / f"{Path(name).stem}.jpg", base_label_path / name)
-               for name in label_filenames if (base_img_path / f"{Path(name).stem}.jpg").exists()]
-    
-    if not matched:
-        raise ValueError(f"No image files found for the matches of {filter_key}={filter_value}")
+    for obj in data.get("labels", []):
+        if "box2d" not in obj:
+            continue
 
-    if output_dir.exists(): shutil.rmtree(output_dir)
-    (output_dir / "images" / "train").mkdir(parents=True, exist_ok=True)
-    (output_dir / "images" / "val").mkdir(parents=True, exist_ok=True)
-    (output_dir / "labels" / "train").mkdir(parents=True, exist_ok=True)
-    (output_dir / "labels" / "val").mkdir(parents=True, exist_ok=True)
+        box = obj["box2d"]
+        x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
 
-    random.shuffle(matched)
-    matched = matched[:count]
-    train_files, val_files = train_test_split(matched, test_size=0.2, random_state=42)
+        bbox = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+        category = obj.get("category", "unknown")
 
-    def _process_split(pairs, split):
-        split_label_dir, split_img_dir = output_dir / "labels" / split, output_dir / "images" / split
-        with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-            futures = [executor.submit(_process_single_file, img, lbl, split_label_dir, split_img_dir) for img, lbl in pairs]
-            for f in as_completed(futures):
-                try:
-                    _ = f.result()
-                except Exception as e:
-                    print(f"A worker process failed: {e}")
+        entry = {"img_name": img_name, "category": category, "bbox": bbox}
 
-    _process_split(train_files, "train")
-    _process_split(val_files, "val")
+        weather_dict.setdefault(weather, []).append(entry)
+        scene_dict.setdefault(scene, []).append(entry)
 
-    yaml_dict = {"train": str((output_dir / "images" / "train").resolve()),
-                 "val": str((output_dir / "images" / "val").resolve()),
-                 "nc": len(YOLO_CLASSES), "names": YOLO_CLASSES}
-    with open(yaml_path, "w", encoding="utf-8") as f:
-        yaml.dump(yaml_dict, f)
-    return yaml_path
+    return weather_dict, scene_dict
 
-def weather_data_process(base_img_path, base_label_path, client_id, client_data_path, weather_tag, count):
-    return _prepare_yolo_dataset(base_img_path, base_label_path, client_id, client_data_path, "weather", weather_tag, count)
 
-def scene_data_process(base_img_path, base_label_path, client_id, client_data_path, scene_tag, count):
-    return _prepare_yolo_dataset(base_img_path, base_label_path, client_id, client_data_path, "scene", scene_tag, count)
+def _merge_dicts(dicts: List[Dict]) -> Dict:
+    merged = {}
+    for d in dicts:
+        for k, v in d.items():
+            merged.setdefault(k, []).extend(v)
+    return merged
+
+
+def create_tag_dicts(label_path: str) -> None:
+    base_path = Path(label_path)
+    if not base_path.exists():
+        logging.error("Base label path does not exist")
+        return
+
+    if (base_path / "weather_dict.json").exists() and (base_path / "scene_dict.json").exists():
+        logging.info("Data indexing already completed")
+        return
+
+    label_files = [base_path / f for f in os.listdir(base_path) if f.endswith(".json")]
+    if not label_files:
+        logging.warning("No JSON files found")
+        return
+
+    with Pool(processes=cpu_count()) as pool:
+        results = pool.map(_process_label_file, label_files)
+
+    weather_parts, scene_parts = zip(*results)
+    weather_dict = _merge_dicts(weather_parts)
+    scene_dict = _merge_dicts(scene_parts)
+
+    with open(base_path / "weather_dict.json", "w") as wf:
+        json.dump(weather_dict, wf, indent=4)
+    with open(base_path / "scene_dict.json", "w") as sf:
+        json.dump(scene_dict, sf, indent=4)
+
+    logging.info("Weather and scene dicts created successfully (multi-file).")
+
+
+# ----------------------------
+# 2. SINGLE-FILE VERSION
+# ----------------------------
+def _process_entries(entries: List[Dict]) -> Tuple[Dict, Dict]:
+    weather_dict: Dict[str, Any] = {}
+    scene_dict: Dict[str, Any] = {}
+
+    for entry in entries:
+        img_name = entry.get("name")
+        attributes = entry.get("attributes", {})
+        weather = attributes.get("weather", "unknown")
+        scene = attributes.get("scene", "unknown")
+
+        for obj in entry.get("labels", []):
+            if "box2d" not in obj:
+                continue
+
+            box = obj["box2d"]
+            x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
+
+            bbox = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+            category = obj.get("category", "unknown")
+
+            item = {"img_name": img_name, "category": category, "bbox": bbox}
+            weather_dict.setdefault(weather, []).append(item)
+            scene_dict.setdefault(scene, []).append(item)
+
+    return weather_dict, scene_dict
+
+
+def create_tag_dicts_from_single(label_file: str) -> None:
+    file_path = Path(label_file)
+    if not file_path.exists():
+        logging.error("Label file does not exist")
+        return
+
+    if (file_path.parent / "weather_dict.json").exists() and (file_path.parent / "scene_dict.json").exists():
+        logging.info("Data indexing already completed")
+        return
+
+    with open(file_path, "r") as f:
+        data = json.load(f)
+
+    if "root" not in data or not isinstance(data["root"], list):
+        logging.error("Invalid JSON format: expected top-level 'root'")
+        return
+
+    entries = data["root"]
+    num_workers = cpu_count()
+    chunk_size = max(1, len(entries) // num_workers)
+    chunks = [entries[i:i + chunk_size] for i in range(0, len(entries), chunk_size)]
+
+    with Pool(processes=num_workers) as pool:
+        results = pool.map(_process_entries, chunks)
+
+    weather_parts, scene_parts = zip(*results)
+    weather_dict = _merge_dicts(weather_parts)
+    scene_dict = _merge_dicts(scene_parts)
+
+    with open(file_path.parent / "weather_dict.json", "w") as wf:
+        json.dump(weather_dict, wf, indent=4)
+    with open(file_path.parent / "scene_dict.json", "w") as sf:
+        json.dump(scene_dict, sf, indent=4)
+
+    logging.info("Weather and scene dicts created successfully (single-file).")
+
+
+# ----------------------------
+# 3. PREPARE YOLO DATASET
+# ----------------------------
+def _convert_to_yolo(bbox, img_w, img_h):
+    x1, y1, x2, y2 = bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]
+    x_center = (x1 + x2) / 2.0 / img_w
+    y_center = (y1 + y2) / 2.0 / img_h
+    w = (x2 - x1) / img_w
+    h = (y2 - y1) / img_h
+    return x_center, y_center, w, h
+
+
+def prepare_yolo_dataset(dict_path: str, img_dir: str, filter_key: str, filter_val: str,
+                         client_id: int, data_count: int, outputdir: str,
+                         train_ratio: float = 0.8) -> str:
+    dict_file = Path(dict_path)
+    img_dir = Path(img_dir)
+    outputdir = Path(outputdir) / f"client_{client_id}"
+
+    with open(dict_file, "r") as f:
+        data_dict = json.load(f)
+
+    if filter_val not in data_dict:
+        raise ValueError(f"{filter_key} value '{filter_val}' not found in {dict_file}")
+
+    entries = data_dict[filter_val][:data_count]
+    random.shuffle(entries)
+
+    split_idx = int(len(entries) * train_ratio)
+    train_entries = entries[:split_idx]
+    val_entries = entries[split_idx:]
+    subsets = {"train": train_entries, "val": val_entries}
+
+    for subset, subset_entries in subsets.items():
+        img_out = Path(outputdir) / "images" / subset
+        lbl_out = Path(outputdir) / "labels" / subset
+        img_out.mkdir(parents=True, exist_ok=True)
+        lbl_out.mkdir(parents=True, exist_ok=True)
+
+        for item in subset_entries:
+            img_name = item["img_name"]
+            bbox = item["bbox"]
+            category = item.get("category", "unknown")
+
+            if category not in CLASS2ID:
+                continue  # skip unknown categories
+
+            src_img = img_dir / img_name
+            dst_img = img_out / img_name
+            if not src_img.exists():
+                continue
+
+            shutil.copy(src_img, dst_img)
+
+            with Image.open(src_img) as im:
+                img_w, img_h = im.size
+
+            class_id = CLASS2ID[category]
+            x_center, y_center, w, h = _convert_to_yolo(bbox, img_w, img_h)
+
+            lbl_path = lbl_out / (Path(img_name).stem + ".txt")
+            with open(lbl_path, "a") as lf:
+                lf.write(f"{class_id} {x_center:.6f} {y_center:.6f} {w:.6f} {h:.6f}\n")
+
+    yaml_path = Path(outputdir) / "dataset.yaml"
+    yaml_dict = {
+        "train": str(Path(outputdir) / "images" / "train"),
+        "val": str(Path(outputdir) / "images" / "val"),
+        "nc": len(YOLO_CLASSES),
+        "names": YOLO_CLASSES
+    }
+    with open(yaml_path, "w") as yf:
+        yaml.dump(yaml_dict, yf)
+
+    logging.info(f"YOLO dataset prepared at {outputdir}")
+    return str(yaml_path)

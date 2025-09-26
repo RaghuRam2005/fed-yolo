@@ -2,12 +2,14 @@
 import numpy as np
 from typing import List, Dict
 
+import torch
 from torch import Tensor
 from ultralytics.engine.results import Results
 
 from .utils import (
     ClientConfig,
-    ClientFitRes
+    ClientFitRes,
+    from_coo,
 )
 
 class Strategy():
@@ -18,36 +20,36 @@ class Strategy():
     def configure_fit(self, epochs:int):
         return ClientConfig(epochs=epochs)
 
-    def aggregate_fit(self, global_state:Dict[str, Tensor], results:List[ClientFitRes]) -> Dict[str, Tensor]:
-        assert (len(results) >= self.min_clients_for_aggregation), \
-        f"Not enough results for aggregation. Expected >= {self.min_clients_for_aggregation}, Got {len(results)}"
-        
-        total_data = sum(res.datacount for res in results)
-        agg_state = {k: v.clone() * 0.0 for k, v in global_state.items()} # Initialize with zeros
+    def aggregate_fit(self, global_state: Dict[str, Tensor], results: List[ClientFitRes]) -> Dict[str, Tensor]:
+        assert len(results) == self.min_clients_for_aggregation, \
+            f"Expected {self.min_clients_for_aggregation} clients, got {len(results)}"
 
-        # Perform weighted aggregation of model updates
-        for res in results:
-            weight = res.datacount / total_data
-            for key, value in res.delta.items():
-                if key not in agg_state: continue # Skip keys not in the global model
+        # Compute inverse sparsity weights
+        inv_sparsities = [1.0 / r.sparsity for r in results]
+        total_inv_sparsity = sum(inv_sparsities)
 
-                if isinstance(value, tuple) and key.endswith('bn.weight'):
-                    # Reconstruct dense tensor from sparse update
-                    indices, params = value
-                    update_tensor = agg_state[key].clone() # Use a zero tensor of the correct shape
-                    update_tensor[indices] = Tensor(params)
-                    agg_state[key] += update_tensor * weight
-                elif isinstance(value, Tensor):
-                    agg_state[key] += value * weight
-        
-        # Apply the aggregated delta to the original global state
-        final_state = {k: v.clone() for k, v in global_state.items()}
-        for key, delta in agg_state.items():
-             if key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-                continue
-             final_state[key] += delta
+        agg_state = {k: v.clone() for k, v in global_state.items()}
 
-        return final_state
+        skip_keys = ['running_mean', 'running_var', 'num_batches_tracked']
+
+        for i, res in enumerate(results):
+            delta_w = inv_sparsities[i] / total_inv_sparsity
+
+            for key, delta in res.delta.items():
+                if any(skip in key for skip in skip_keys):
+                    continue
+
+                if isinstance(delta, torch.Tensor) and delta.is_sparse:
+                    # Convert sparse COO delta to dense
+                    dense_delta = from_coo(delta)
+                    agg_state[key] += delta_w * dense_delta
+                elif isinstance(delta, torch.Tensor):
+                    # Dense update
+                    agg_state[key] += delta_w * delta
+                else:
+                    raise TypeError(f"Delta for key {key} is not a torch.Tensor")
+
+        return agg_state
 
     def position_clients(self, results:Dict[int, Results]) -> Dict[int, int]:
         """
