@@ -5,12 +5,11 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
-from . import (
+from obj_yolo import (
     Client,
     Server,
     Strategy,
-    weather_data_process,
-    scene_data_process,
+    create_yolo_dataset
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -27,13 +26,7 @@ def run_experiment(experiment_type: str):
 
     # --- Paths (Update these to your BDD100K dataset location) ---
     base_path = os.path.dirname(os.path.abspath(__file__))
-    yolo_config = Path(base_path) / "yolo_config" / "yolov8n.yaml"
-    
-    # BDD100K dataset paths
-    img_base_path = Path(base_path) / "base_data" / "bdd100k" / "images" / "100k"
-    label_base_path = Path(base_path) / "base_data" / "bdd100k" / "labels" / "100k"
-    
-    client_base_path = Path(base_path) / "prepared_data" / "clients"
+    yolo_config = Path(base_path) / "yolo_config" / "yolo11n.yaml"
     model = YOLO(yolo_config)
     
     # --- Experiment Parameters ---
@@ -59,26 +52,23 @@ def run_experiment(experiment_type: str):
         configure_fit = server.strategy.configure_fit(epochs=epochs_per_round)
         fit_results = []
         data_paths = {}
-
         logging.info("-------------- Client Data Preparation & Training Started ------------")
         for client in clients:
             logging.info(f"------ Client {client.client_id} (Tag: {client.tag}) ------")
             
-            data_path_loader = weather_data_process if experiment_type == "weather" else scene_data_process
-            data_path = data_path_loader(
-                base_img_path=img_base_path / "train",
-                base_label_path=label_base_path / "train",
-                client_id=client.client_id,
-                client_data_path=client_base_path,
-                weather_tag=client.tag,
-                scene_tag=client.tag,
-                count=client_data_count
+            data_path_dict = create_yolo_dataset(
+                base_path=base_path,
+                client_id=str(client.client_id),
+                filter_key=experiment_type,
+                filter_value=client.tag,
+                data_count=client_data_count,
             )
-            data_paths[client.client_id] = data_path
+            data_yaml_path = data_path_dict["data_yaml_path"]
+            data_paths[client.client_id] = data_yaml_path
             
             client.model = YOLO(yolo_config)
             client.update_model(parameters=server.global_state)
-            result = client.fit(client_config=configure_fit, data_path=data_path)
+            result = client.fit(client_config=configure_fit, data_path=data_yaml_path)
             fit_results.append(result)
 
         logging.info("------------- Aggregation Started -------------------- ")
