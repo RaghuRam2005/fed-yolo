@@ -8,5 +8,5 @@ __all__ = [
     "Server",
     "Strategy",
     "Client",
-    "load_data"
+    "load_data",
 ]

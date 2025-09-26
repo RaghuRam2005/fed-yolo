@@ -10,7 +10,7 @@ class Server:
     def __init__(self, communication_rounds:int, model:Model, strategy:Strategy, num_nodes:int):
         self.communication_rounds = communication_rounds
         self.global_model = model
-        self.global_state = self.global_model.model.model.state_dict()
+        self.global_state = self.global_model.state_dict()
         self.strategy = strategy
         self.num_nodes = num_nodes
     

@@ -2,11 +2,12 @@
 import numpy as np
 from typing import List, Dict
 
-from torch import Tensor
+import torch
 
 from .utils import (
     ClientConfig,
-    ClientFitRes
+    ClientFitRes,
+    from_coo,
 )
 
 class Strategy():
@@ -17,47 +18,39 @@ class Strategy():
     def configure_fit(self, epochs:int):
         return ClientConfig(epochs=epochs)
 
-    def aggregate_fit(self, global_state:Dict[str, Tensor], results:List[ClientFitRes]) -> Dict[str, Tensor]:
-        assert (len(results) == self.min_clients_for_aggregation), \
-        f"Not enough or Excessive results than {self.min_clients_for_aggregation}"
-        
-        sparcities = []
-        for result in results:
-            sparcities.append(result.sparsity)
-        
-        inv_sparcities = [1.0 / s for s in sparcities]
-        inv_sparcity = sum(inv_sparcities)
+    def aggregate_fit(self, global_state: Dict[str, torch.Tensor], results: List[ClientFitRes]) -> Dict[str, torch.Tensor]:
+        if len(results) == self.min_clients_for_aggregation:
+            raise ValueError(f"Expected at least {self.min_clients_for_aggregation} clients, got {len(results)}")
 
-        agg_state = {k:v.clone() for k, v in global_state.items()}
-        for i, result in enumerate(results):
-            delta_w = inv_sparcities[i] / inv_sparcity
+        # Compute inverse sparsity weights
+        sparsities = [res.sparsity for res in results]
+        inv_sparsities = [1.0 / max(s, 0.2) for s in sparsities]
+        inv_sparsity_sum = sum(inv_sparsities)
 
-            for d_key in result.delta.keys():
-                if d_key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
+        # Initialize aggregated state
+        agg_state = {k: v.clone() for k, v in global_state.items()}
+
+        # Aggregate client updates
+        for i, res in enumerate(results):
+            weight = inv_sparsities[i] / inv_sparsity_sum
+            for key, delta in res.delta.items():
+                if key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
                     continue
-                assert d_key in agg_state.keys(), \
-                f"result key at index {i}, key: {d_key} not found , client keys: {agg_state.keys()}"
-
-            for key, weight in agg_state.items():
-                if key.endswith('bn.weight'):
-                    new_weight = np.zeros_like(weight, dtype=float)
-                    ind, params = result.delta[key]
-                    p_ind = 0
-                    for j in ind:
-                        new_weight[j] = params[p_ind]
-                        p_ind += 1
-                    weight += (delta_w * new_weight)
-                    agg_state[key] = Tensor(weight)
-                elif key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-                    continue
+                if isinstance(delta, torch.Tensor) and delta.is_sparse():
+                    dense_delta = from_coo(delta)
+                    agg_state[key] += weight * dense_delta
+                elif isinstance(delta, torch.Tensor):
+                    agg_state[key] += weight * delta
                 else:
-                    weight += (delta_w * result.delta[key])
-                    agg_state[key] = Tensor(weight)
-            
-            for d_key in result.delta.keys():
-                if d_key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-                    continue
-                assert d_key in agg_state.keys(), \
-                f"After aggregation result key at index {i}, key: {d_key} not found , client keys: {agg_state.keys()}"
-        
+                    raise TypeError(f"Delta for key {key} is not a torch.Tensor")
+
+        # Check parameter consistency
+        expected_keys = {k for k in global_state if not k.endswith(('running_mean', 'running_var', 'num_batches_tracked'))}
+        all_delta_keys = set().union(*(res.delta.keys() for res in results))
+        missing = expected_keys - all_delta_keys
+        extra = all_delta_keys - expected_keys
+        if missing or extra:
+            raise ValueError(f"Delta parameters mismatch. Missing: {missing}, Extra: {extra}")
+
         return agg_state
+

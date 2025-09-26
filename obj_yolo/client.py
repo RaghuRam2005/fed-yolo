@@ -2,21 +2,19 @@
 import os
 from typing import Dict
 
-from torch import Tensor
+import torch
+from torch.nn.modules.batchnorm import _BatchNorm
+
 from ultralytics.engine.model import Model
 from ultralytics.engine.results import Results
+from ultralytics.utils.torch_utils import unwrap_model
 
 from .utils import (
     ClientConfig,
     ClientFitRes,
 
     client_train,
-    set_parameters,
-
-    generate_mask,
-    log_pruning_statistics,
-    apply_mask_to_model,
-    create_sparse_update
+    to_coo,
 )
 
 class Client:
@@ -26,8 +24,8 @@ class Client:
         self.model:Model = None
         self.rounds_completed = 0
     
-    def update_model(self, parameters:Dict[str, Tensor]):
-        self.model = set_parameters(model=self.model, parameters=parameters)
+    def update_model(self, parameters:Dict[str, torch.Tensor]):
+        self.model.load_state_dict(parameters, strict=True)
 
     def update_sparsity(self) -> None:
         """
@@ -46,7 +44,7 @@ class Client:
         if not self.model:
             raise AttributeError(f"client {self.client_id} model attribute is not set")
         
-        client_parameters = self.model.model.model.state_dict()
+        client_parameters = self.model.state_dict()
         
         # training the local model
         results = client_train(
@@ -56,37 +54,37 @@ class Client:
             epochs=client_config.epochs,
         )
 
-        mask = generate_mask(model=self.model, sparsity=self.sparsity)
+        # unwrap the model
+        unwrapped_model = unwrap_model(self.model)
 
-        log_pruning_statistics(model=self.model, mask=mask)
+        # compute tau based on BatchNorm weights
+        bn_modules = [m for _, m in unwrapped_model.named_modules() if isinstance(m, _BatchNorm)]
+        bn_weights = torch.cat([m.weight.abs().detach() for m in bn_modules])
+        tau = torch.quantile(input=bn_weights, q=self.sparsity)
 
+        # Prepare set of BatchNorm weight parameter names
+        bn_weight_names = {f"{name}.weight" for name, m in unwrapped_model.named_modules() if isinstance(m, _BatchNorm)}
+
+        # initialize deltas
         delta = {}
-        for key, weights in self.model.model.model.named_parameters():
-            if key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-                delta[key] = weights
+
+        # compute deltas
+        for name, param in self.model.named_parameters():
+            delta_tensor = param - client_parameters[name]
+
+            if name in bn_weight_names:
+                delta[name] = to_coo(delta_tensor, tau)
             else:
-                delta[key] = client_parameters[key] - weights
-        
-        for d_key in delta.keys():
-            if d_key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-                continue
-            assert d_key in client_parameters.keys(), \
-            f"delta key: {d_key} not found, client keys: {client_parameters.keys()}"
-        sparse_weights = apply_mask_to_model(delta=delta, mask=mask)
+                delta[name] = delta_tensor
 
-        for s_key in sparse_weights.keys():
-            if s_key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-                continue
-            assert s_key in client_parameters.keys(), \
-            f"sparse weight key: {s_key} not found, client keys: {client_parameters.keys()}"
+        skip_keys = ['running_mean', 'running_var', 'num_batches_tracked']
+        expected_keys = {k for k in client_parameters.keys() if not any(skip in k for skip in skip_keys)}
+        if set(delta.keys()) != expected_keys:
+            missing = expected_keys - set(delta.keys())
+            extra = set(delta.keys()) - expected_keys
+            raise ValueError(f"Delta parameters do not match client parameters. Missing: {missing}, Extra: {extra}")        
 
-
-        sparse_update = create_sparse_update(parameters=sparse_weights)
-
-        assert(sparse_update.keys() == sparse_weights.keys()), \
-        "sparse update keys and sparse weight keys doesn't match"
-
-        client_res = ClientFitRes(delta=sparse_update, metrics=results, datacount=1000, sparsity=self.sparsity)
+        client_res = ClientFitRes(delta=delta, metrics=results, datacount=1000, sparsity=self.sparsity)
 
         self.rounds_completed += 1
         self.update_sparsity()
