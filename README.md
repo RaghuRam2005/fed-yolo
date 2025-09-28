@@ -48,7 +48,7 @@ To set up and run the project:
 
 5. **Run the simulation**
     ```bash
-    uv run ./obj_yolo/simulation.py
+    uv run simulation.py
     ```
 
 ## References
