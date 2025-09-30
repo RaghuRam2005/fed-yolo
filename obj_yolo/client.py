@@ -1,5 +1,6 @@
 #client.py
 import os
+import logging
 from typing import Dict
 
 import torch
@@ -18,16 +19,18 @@ from .utils import (
 )
 
 class Client:
-    def __init__(self, client_id:int, sparsity:float):
+    def __init__(self, client_id:int, sparsity:float, tag:str="None"):
         self.client_id = client_id
         self.sparsity = sparsity
+        self.tag = tag
         self.model:Model = None
         self.rounds_completed = 0
+        self.last_map = 0.0
     
     def update_model(self, parameters:Dict[str, torch.Tensor]):
         self.model.model.model.load_state_dict(parameters, strict=True)
 
-    def update_sparsity(self) -> None:
+    def update_sparsity_linear(self) -> None:
         """
         Updates the client's sparsity parameter based on the number of rounds completed.
         Sparsity increases as the training progresses.
@@ -39,6 +42,29 @@ class Client:
         target = min_sparsity + growth_rate * self.rounds_completed
         new_sparsity = min(max(target, min_sparsity), max_sparsity)
         self.sparsity = new_sparsity
+    
+    def update_sparsity_performance(self, current_map:float) -> None:
+        """
+        Updates the client's sparsity based on validation performance (mAP).
+        - If mAP improves, slightly increase sparsity (become more efficient).
+        - If mAP stagnates or drops, decrease sparsity to update more parameters.
+        (For Experiments 2 & 3)
+        """
+        min_sparsity = 0.2
+        max_sparsity = 0.9
+        adjustment_rate = 0.05
+
+        if current_map > self.last_map:
+            # Performance improved, increase sparsity
+            self.sparsity += adjustment_rate
+        else:
+            # Performance dropped or stagnated, decrease sparsity
+            self.sparsity -= adjustment_rate
+
+        # Clamp the sparsity within the defined min/max bounds
+        self.sparsity = max(min_sparsity, min(self.sparsity, max_sparsity))
+        self.last_map = current_map
+        logging.info(f"Client {self.client_id} | Last mAP: {self.last_map:.4f} | New Sparsity: {self.sparsity:.2f}")
     
     def fit(self, client_config:ClientConfig, data_path:str) -> ClientFitRes:
         if not self.model:
@@ -87,7 +113,6 @@ class Client:
         client_res = ClientFitRes(delta=delta, metrics=results, datacount=1000, sparsity=self.sparsity)
 
         self.rounds_completed += 1
-        self.update_sparsity()
 
         return client_res
 

@@ -10,90 +10,204 @@ from obj_yolo import (
     Client,
     Server,
     Strategy,
-    load_data
+    kitti_client_data,
+    build_dicts,
+    bdd_client_data,
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-if __name__ == "__main__":
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    strategy = Strategy(
-        min_clients_for_aggregation=2
-    )
+# --- Experiment 1: FedWeg on KITTI with Linear Sparsity Update ---
+def run_fed_weg_kitti():
+    """
+    Runs the FedWeg simulation on the KITTI dataset.
+    Sparsity increases linearly with each communication round.
+    """
+    logging.info("==========================================================")
+    logging.info("= Running Experiment 1: FedWeg on KITTI Dataset          =")
+    logging.info("==========================================================")
+    strategy = Strategy(min_clients_for_aggregation=3)
 
-    base_path = os.path.dirname(os.path.abspath(__file__))
-    yolo_config = Path(base_path) / "yolo_config" / "yolo11n.yaml"
-    img_base_path = Path(base_path) / "base_data" / "training"
-    client_base_path = Path(base_path) / "prepared_data" / "clients"
+    base_path = Path(__file__).parent
+    yolo_config = base_path / "yolo_config" / "yolov8n.yaml"
+    img_base_path = base_path / "base_data" / "training"
+    client_base_path = base_path / "prepared_data" / "kitti_clients"
     model = YOLO(yolo_config)
     epochs = 1
-    image_list = os.listdir(Path(img_base_path) / "image_2")
+    num_clients = 3
+    communication_rounds = 5
     client_data_count = 1000
+    
+    try:
+        image_list = os.listdir(Path(img_base_path) / "image_2")
+    except FileNotFoundError:
+        logging.error(f"KITTI image directory not found at {img_base_path / 'image_2'}")
+        logging.error("Please ensure the KITTI dataset is correctly placed.")
+        return
+
     random.shuffle(image_list)
 
-    # instead of global data for simualation we take client id as 100 and generate data
-    global_data_path = load_data(
-        base_path=img_base_path,
-        client_base_path=client_base_path,
-        client_id=100,
-        train_images=image_list[:100],
-        val_images=image_list[100:151]
-    )
-    model.train(
-        epochs=10,
-        data=global_data_path,
-        project="fed_yolo",
-        name="global_train",
-        exist_ok=True,
-    )
-
     server = Server(
-        communication_rounds=1,
+        communication_rounds=communication_rounds,
         model=model,
         strategy=strategy,
-        num_nodes=3
+        num_nodes=num_clients
     )
+    clients = server.create_clients(tag_list=[])
 
-    clients = server.create_clients()
+    completed_images = 0
+    data_paths = {}
 
-    completed_images = 151
     for i in range(server.communication_rounds):
-        logging.info(f"------------------ Communication Round 1 --------------------")
+        logging.info(f"------------------ Communication Round {i+1}/{server.communication_rounds} --------------------")
         configure_fit = server.strategy.configure_fit(epochs=epochs)
         results = []
-        data_paths = []
-        logging.info("-------------- client training started ------------")
+        
+        logging.info("-------------- Client Training Started ------------")
         for client in clients:
-            logging.info(f"------ client {client.client_id} ------")
+            logging.info(f"------ Training Client {client.client_id} (Sparsity: {client.sparsity:.2f}) ------")
             client.model = YOLO(yolo_config)
             client.update_model(parameters=server.global_state)
-            train_list = image_list[completed_images:completed_images+client_data_count]
-            completed_images += client_data_count
-            val_list = image_list[completed_images:completed_images+100]
-            completed_images += 1
-            data_path = load_data(
-                base_path=img_base_path, 
-                client_base_path=client_base_path, 
+            
+            # Assign data to client
+            start_idx = completed_images
+            end_idx = start_idx + client_data_count
+            train_list = image_list[start_idx:end_idx]
+            val_list = image_list[end_idx:end_idx+100]
+            completed_images = end_idx + 100
+
+            data_path = kitti_client_data(
+                base_path=img_base_path,
+                client_base_path=client_base_path,
                 client_id=client.client_id,
                 train_images=train_list,
                 val_images=val_list)
-            data_paths.append(data_path)
+            data_paths[client.client_id] = data_path
+            
             result = client.fit(client_config=configure_fit, data_path=data_path)
             results.append(result)
-        logging.info("------------- Aggregation Started -------------------- ")
+            client.update_sparsity_linear()
+
+        logging.info("------------- Aggregation Started --------------------")
         aggregate_state = server.strategy.aggregate_fit(global_state=server.global_state, results=results)
-        logging.info("------------- Aggregation Completed ------------------- ")
-        logging.info("updating global model state")
-        server.global_model.model.model.load_state_dict(aggregate_state)
+        logging.info("------------- Aggregation Completed ------------------")
+        
+        server.global_model.model.model.load_state_dict(aggregate_state, strict=False)
         server.global_state = server.global_model.model.model.state_dict()
-        logging.info("global model updation complete")
-        logging.info("------------------ CLIENT EVALUATION STARTED --------------- ")
+        logging.info("Global model state updated.")
+
+        logging.info("------------------ Client Evaluation Started ---------------")
         for client in clients:
             client.update_model(parameters=server.global_state)
             metrics = client.evaluate(data_paths[client.client_id])
-            logging.info(f"---------- Evaluation Client {client.client_id} ----------- ")
-            logging.info(f"mAP 50-95: {metrics.box.map}")
-            logging.info(f"mAP 50   : {metrics.box.map50}")
-            logging.info(f"mAP 75   : {metrics.box.map75}")
-        logging.info("---------------- CLIENT EVALUATION COMPLETE ----------------- ")
-    logging.info(" ----------------- FEDERATED LEARNING LOOP COMPLETE -------------------- ")
+            logging.info(f"------ Evaluation Client {client.client_id} | mAP50-95: {metrics.box.map:.4f} ------")
+
+    logging.info("========== FEDERATED LEARNING (KITTI) COMPLETE ==========\n")
+
+# --- Experiments 2 & 3: FedWeg on BDD100K with Performance-based Sparsity Update ---
+def run_fed_weg_bdd(partition_attribute: str):
+    """
+    Runs the FedWeg simulation on the BDD100K dataset, partitioned by a specific attribute.
+    Sparsity is dynamically adjusted based on client validation performance.
+    
+    Args:
+        partition_attribute (str): The attribute to partition data by ('weather' or 'scene').
+    """
+    logging.info("===============================================================")
+    logging.info(f"= Running Experiment: FedWeg on BDD100K (Partition: {partition_attribute.upper()}) =")
+    logging.info("===============================================================")
+    
+    strategy = Strategy(min_clients_for_aggregation=3)
+    
+    base_path = Path(__file__).parent
+    yolo_config = base_path / "yolo_config" / "yolov8n.yaml"
+    base_data_path = base_path / "bdd100k_kaggle"
+    client_base_path = base_path / "prepared_data" / "bdd_clients"
+    model = YOLO(yolo_config)
+    epochs = 3
+    num_clients = 3
+    communication_rounds = 5
+    client_data_count = 1500
+
+    label_path = base_data_path / "labels" / "bdd100k_labels_images_train.json"
+    if not label_path.exists():
+        logging.error(f"BDD100K label file not found at {label_path}")
+        logging.error("Please ensure the BDD100K dataset is correctly placed.")
+        return
+        
+    weather_dict, scene_dict = build_dicts(label_file=str(label_path))
+    
+    data_dict = weather_dict if partition_attribute == 'weather' else scene_dict
+    valid_tags = [tag for tag, images in data_dict.items() if len(images) > (client_data_count + 200)]
+    if len(valid_tags) < num_clients:
+        logging.error(f"Not enough data categories in '{partition_attribute}' for {num_clients} clients.")
+        return
+
+    server = Server(
+        communication_rounds=communication_rounds,
+        model=model,
+        strategy=strategy,
+        num_nodes=num_clients
+    )
+    
+    clients = server.create_clients(tag_list=valid_tags)
+    data_paths = {}
+
+    for i in range(server.communication_rounds):
+        logging.info(f"------------------ Communication Round {i+1}/{server.communication_rounds} --------------------")
+        configure_fit = server.strategy.configure_fit(epochs=epochs)
+        results = []
+
+        logging.info("-------------- Client Training Started ------------")
+        for client in clients:
+            logging.info(f"------ Training Client {client.client_id} (Tag: {client.tag}, Sparsity: {client.sparsity:.2f}) ------")
+            client.model = YOLO(yolo_config)
+            client.update_model(parameters=server.global_state)
+            
+            image_list = data_dict[client.tag]
+            random.shuffle(image_list) # Shuffle to get different data each round if needed
+            train_list = image_list[:client_data_count]
+            val_list = image_list[client_data_count:client_data_count+200]
+            
+            data_path = bdd_client_data(
+                base_data_path=str(base_data_path),
+                client_data_path=str(client_base_path),
+                client_id=client.client_id,
+                train_images=train_list,
+                val_images=val_list,
+            )
+            data_paths[client.client_id] = data_path
+            
+            result = client.fit(client_config=configure_fit, data_path=str(data_path))
+            results.append(result)
+
+        logging.info("------------- Aggregation Started --------------------")
+        aggregate_state = server.strategy.aggregate_fit(global_state=server.global_state, results=results)
+        logging.info("------------- Aggregation Completed ------------------")
+        
+        server.global_model.model.model.load_state_dict(aggregate_state, strict=False)
+        server.global_state = server.global_model.model.model.state_dict()
+        logging.info("Global model state updated.")
+        
+        logging.info("------------------ Client Evaluation & Sparsity Update Started ---------------")
+        for client in clients:
+            client.update_model(parameters=server.global_state)
+            metrics = client.evaluate(data_paths[client.client_id])
+            logging.info(f"------ Evaluation Client {client.client_id} | mAP50-95: {metrics.box.map:.4f} ------")
+            # Update sparsity based on performance for the NEXT round
+            client.update_sparsity_performance(current_map=metrics.box.map)
+
+    logging.info(f"========== FEDERATED LEARNING (BDD100K - {partition_attribute.upper()}) COMPLETE ==========\n")
+
+
+if __name__ == "__main__":
+    # Experiment 1
+    run_fed_weg_kitti()
+    
+    # Experiment 2
+    run_fed_weg_bdd(partition_attribute='weather')
+    
+    # Experiment 3
+    run_fed_weg_bdd(partition_attribute='scene')

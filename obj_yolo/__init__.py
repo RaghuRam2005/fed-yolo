@@ -2,11 +2,13 @@
 from .server import Server
 from .strategy import Strategy
 from .client import Client
-from .dataset import load_data
+from .dataset import kitti_client_data, bdd_client_data, build_dicts
 
 __all__ = [
     "Server",
     "Strategy",
     "Client",
-    "load_data",
+    "kitti_client_data",
+    "build_dicts",
+    "bdd_client_data",
 ]

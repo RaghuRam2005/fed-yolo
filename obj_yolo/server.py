@@ -1,4 +1,5 @@
 #server.py
+import random
 from typing import List
 
 from ultralytics.engine.model import Model
@@ -14,10 +15,14 @@ class Server:
         self.strategy = strategy
         self.num_nodes = num_nodes
     
-    def create_clients(self) -> List[Client]:
+    def create_clients(self, tag_list:List) -> List[Client]:
         clients = []
         for num in range(self.num_nodes):
-            client = Client(client_id=num, sparsity=0.2)
+            if tag_list:
+                tag = tag_list[random.randint(0, len(tag_list)-1)]
+                client = Client(client_id=num, sparsity=0.2, tag=tag)
+            else:
+                client = Client(client_id=num, sparsity=0.2)
             clients.append(client)
         
         return clients
