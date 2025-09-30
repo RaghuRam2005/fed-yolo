@@ -45,6 +45,7 @@ def client_train(model:Model, data_path:str, client_id:int, epochs:int) -> Resul
         deterministic=True,
         freeze=0,
         plots=True, # useful for verification
+        l1_lambda=1e-4,
     )
 
     return results
