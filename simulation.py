@@ -25,15 +25,22 @@ if __name__ == "__main__":
     yolo_config = Path(base_path) / "yolo_config" / "yolo11n.yaml"
     img_base_path = Path(base_path) / "base_data" / "training"
     client_base_path = Path(base_path) / "prepared_data" / "clients"
-    global_data_path = Path(base_path) / "prepared_data" / "data.yaml"
     model = YOLO(yolo_config)
     epochs = 1
     image_list = os.listdir(Path(img_base_path) / "image_2")
     client_data_count = 1000
     random.shuffle(image_list)
 
+    # instead of global data for simualation we take client id as 100 and generate data
+    global_data_path = load_data(
+        base_path=img_base_path,
+        client_base_path=client_base_path,
+        client_id=100,
+        train_images=image_list[:100],
+        val_images=image_list[100:151]
+    )
     model.train(
-        epochs=1,
+        epochs=10,
         data=global_data_path,
         project="fed_yolo",
         name="global_train",
@@ -44,12 +51,12 @@ if __name__ == "__main__":
         communication_rounds=1,
         model=model,
         strategy=strategy,
-        num_nodes=2
+        num_nodes=3
     )
 
     clients = server.create_clients()
 
-    completed_images = 0
+    completed_images = 151
     for i in range(server.communication_rounds):
         logging.info(f"------------------ Communication Round 1 --------------------")
         configure_fit = server.strategy.configure_fit(epochs=epochs)
