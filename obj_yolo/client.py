@@ -25,7 +25,7 @@ class Client:
         self.rounds_completed = 0
     
     def update_model(self, parameters:Dict[str, torch.Tensor]):
-        self.model.load_state_dict(parameters, strict=True)
+        self.model.model.model.load_state_dict(parameters, strict=True)
 
     def update_sparsity(self) -> None:
         """
@@ -44,7 +44,7 @@ class Client:
         if not self.model:
             raise AttributeError(f"client {self.client_id} model attribute is not set")
         
-        client_parameters = self.model.state_dict()
+        client_parameters = self.model.model.model.state_dict()
         
         # training the local model
         results = client_train(
@@ -58,18 +58,18 @@ class Client:
         unwrapped_model = unwrap_model(self.model)
 
         # compute tau based on BatchNorm weights
-        bn_modules = [m for _, m in unwrapped_model.named_modules() if isinstance(m, _BatchNorm)]
+        bn_modules = [m for _, m in unwrapped_model.model.model.named_modules() if isinstance(m, _BatchNorm)]
         bn_weights = torch.cat([m.weight.abs().detach() for m in bn_modules])
         tau = torch.quantile(input=bn_weights, q=self.sparsity)
 
         # Prepare set of BatchNorm weight parameter names
-        bn_weight_names = {f"{name}.weight" for name, m in unwrapped_model.named_modules() if isinstance(m, _BatchNorm)}
+        bn_weight_names = {f"{name}.weight" for name, m in unwrapped_model.model.model.named_modules() if isinstance(m, _BatchNorm)}
 
         # initialize deltas
         delta = {}
 
         # compute deltas
-        for name, param in self.model.named_parameters():
+        for name, param in self.model.model.model.named_parameters():
             delta_tensor = param - client_parameters[name]
 
             if name in bn_weight_names:
