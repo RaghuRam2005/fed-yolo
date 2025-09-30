@@ -48,7 +48,6 @@ if __name__ == "__main__":
     )
 
     clients = server.create_clients()
-    print(server.global_state.keys())
 
     completed_images = 0
     for i in range(server.communication_rounds):
