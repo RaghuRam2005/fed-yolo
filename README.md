@@ -32,7 +32,7 @@ To set up and run the project:
 
 1. **Clone the repository**
     ```bash
-    git clone https://github.com/your-username/obj_yolo.git
+    git clone https://github.com/RaghuRam2005/obj_yolo.git
     cd obj_yolo
     ```
 
@@ -48,7 +48,7 @@ To set up and run the project:
 
 5. **Run the simulation**
     ```bash
-    uv run ./obj_yolo/simulation.py
+    uv run simulation.py
     ```
 
 ## References
