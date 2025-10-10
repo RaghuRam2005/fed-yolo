@@ -1,57 +1,71 @@
 #client.py
 import os
 from typing import Dict
+from abc import ABC, abstractmethod
 
 import torch
 from torch.nn.modules.batchnorm import _BatchNorm
 
+from ultralytics import YOLO
 from ultralytics.engine.model import Model
 from ultralytics.engine.results import Results
 from ultralytics.utils.torch_utils import unwrap_model
 
 from .utils import (
-    ClientConfig,
-    ClientFitRes,
-
+    FitResFedWeg,
+    FitConfig,
     client_train,
     to_coo,
+    model_state,
 )
 
-class Client:
-    def __init__(self, client_id:int, sparsity:float):
+SKIP_KEYS = ['running_mean', 'running_var', 'num_batches_tracked']
+
+class Client(ABC):
+    @abstractmethod
+    def update_model(self):
+        pass
+    
+    @abstractmethod
+    def prepare_data(self):
+        pass
+
+    @abstractmethod
+    def fit(self):
+        pass
+    
+    @abstractmethod
+    def evaluate(self):
+        pass
+
+class FedWegClient(Client):
+    def __init__(self, model_path:str, client_id:int, sparsity:float, fitconfig:FitConfig) -> None:
+        self.model = YOLO(model_path)
         self.client_id = client_id
         self.sparsity = sparsity
-        self.model:Model = None
         self.rounds_completed = 0
+        self.fitconfig = fitconfig
     
-    def update_model(self, parameters:Dict[str, torch.Tensor]):
+    def update_model(self, parameters:Dict[str, torch.Tensor]) -> None:
+        expected_keys = [k for k, _ in self.model.model.model.named_parameters()]
+        parameters_keys = [k for k, _ in parameters.items() if not any(k.endswith(skip) for skip in SKIP_KEYS)]
+        assert expected_keys == parameters_keys, f"Client {self.client_id} Error: update model parameter keys and model keys doesn't match"
         self.model.model.model.load_state_dict(parameters, strict=True)
 
-    def update_sparsity(self) -> None:
-        """
-        Updates the client's sparsity parameter based on the number of rounds completed.
-        Sparsity increases as the training progresses.
-        """
-        min_sparsity = 0.2
-        max_sparsity = 0.9
-        growth_rate = 0.05
+    def prepare_data(self):
+        
 
-        target = min_sparsity + growth_rate * self.rounds_completed
-        new_sparsity = min(max(target, min_sparsity), max_sparsity)
-        self.sparsity = new_sparsity
-    
-    def fit(self, client_config:ClientConfig, data_path:str) -> ClientFitRes:
-        if not self.model:
-            raise AttributeError(f"client {self.client_id} model attribute is not set")
-        
-        client_parameters = self.model.model.model.state_dict()
-        
+    def fit(
+            self
+    ):
+        init_client_params = model_state(self.model)
+
         # training the local model
         results = client_train(
-            model=self.model,
-            data_path=data_path,
-            client_id=self.client_id,
-            epochs=client_config.epochs,
+                model=self.model,
+                data_path=self.fitconfig.data_path,
+                client_id=self.client_id,
+                epochs=self.fitconfig.epochs,
         )
 
         # unwrap the model
@@ -62,38 +76,32 @@ class Client:
         bn_weights = torch.cat([m.weight.abs().detach() for m in bn_modules])
         tau = torch.quantile(input=bn_weights, q=self.sparsity)
 
-        # Prepare set of BatchNorm weight parameter names
-        bn_weight_names = {f"{name}.weight" for name, m in unwrapped_model.model.model.named_modules() if isinstance(m, _BatchNorm)}
+        # prepare set of BatchNorm weight parameter names
+        bn_w_names = {f"{name}.weight" for name, m in unwrapped_model.model.model.named_modules() if isinstance(m, _BatchNorm)}
 
         # initialize deltas
         delta = {}
 
         # compute deltas
         for name, param in self.model.model.model.named_parameters():
-            delta_tensor = param - client_parameters[name]
-
-            if name in bn_weight_names:
+            delta_tensor = param - init_client_params[name]
+            
+            if name in bn_w_names:
                 delta[name] = to_coo(delta_tensor, tau)
             else:
                 delta[name] = delta_tensor
 
-        skip_keys = ['running_mean', 'running_var', 'num_batches_tracked']
-        expected_keys = {k for k in client_parameters.keys() if not any(skip in k for skip in skip_keys)}
-        if set(delta.keys()) != expected_keys:
-            missing = expected_keys - set(delta.keys())
-            extra = set(delta.keys()) - expected_keys
-            raise ValueError(f"Delta parameters do not match client parameters. Missing: {missing}, Extra: {extra}")        
-
-        client_res = ClientFitRes(delta=delta, metrics=results, datacount=1000, sparsity=self.sparsity)
+        # validation step
+        expected_keys = [k for k, _ in init_client_params.items() if not any(k.endswith(skip) for skip in SKIP_KEYS)]
+        assert expected_keys == delta.keys(), f"Client {self.client_id}: delta parameters deos not match client parameter"
 
         self.rounds_completed += 1
-        self.update_sparsity()
-
+        client_res = FitResFedWeg(delta=delta, metrics=results, sparsity=self.sparsity)
         return client_res
 
-    def evaluate(self, data_path:str) -> Results:
+    def evaluate(self) -> Results:
         metrics = self.model.val(
-            data=data_path,
+            data=self.fitconfig.data_path,
             save_json=True,
             plots=True,
             project="fed_yolo",
@@ -101,3 +109,8 @@ class Client:
         )
 
         return metrics
+
+class FedTagClient(FedWegClient):
+    def __init__(self, model_path:str, client_id:int, sparsity:float, tag:str) -> None:
+        super().__init__(model_path=model_path, client_id=client_id, sparsity=sparsity)
+        self.tag = tag
