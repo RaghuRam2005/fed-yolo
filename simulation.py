@@ -80,7 +80,7 @@ def fedtag_weather_experiment():
         tag_based_results = server.start_evaluation()
         logging.info("----------------------- EVALUATION COMPLETE -------------------------")
         logging.info("----------------------- SPARSITY UPDATION ---------------------------")
-        server.update_sparsity()
+        server.update_sparsity(tag_based_results)
     
     tag_based_results = server.start_evaluation()
     print("------------------ FINAL RESULTS ----------------- ")
