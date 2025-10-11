@@ -37,10 +37,14 @@ def fedtag_weather_experiment():
     data_class = BddData(base_data_path=base_data_path, prep_data_path=prep_data_path, exist_ok=False)
     weather_dict, scene_dict = data_class.create_tag_dicts()
 
-    for key, values in weather_dict:
+    keys_to_remove = []
+    for key, values in weather_dict.items():
         if not len(values) > train_data_count + val_data_count:
-            weather_dict.pop(key)
-    
+            keys_to_remove.append(key)
+
+    for key in keys_to_remove:
+        weather_dict.pop(key)
+        
     strategy = FedTag(
         data_class=data_class,
         initial_sparsity=initial_sparsity,

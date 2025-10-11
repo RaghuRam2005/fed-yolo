@@ -152,7 +152,7 @@ class BddData:
         weather_dict, scene_dict = {}, {}
 
         with Pool(processes=cpu_count()) as pool:
-            results = pool.map(self.process_label, label_data)
+            results = pool.map(self.process_labels, label_data)
 
         for weather, scene, entry in results:
             weather_dict.setdefault(weather, []).append(entry)

@@ -71,7 +71,7 @@ class FedWegClient(Client):
             raise Exception(f"client {self.client_id}: Data not found at {self.data_path}")
         results = client_train(
                 model=self.model,
-                data_path=self.fitconfig.data_path,
+                data_path=self.data_path,
                 client_id=self.client_id,
                 epochs=self.fitconfig.epochs,
         )
@@ -109,7 +109,7 @@ class FedWegClient(Client):
 
     def evaluate(self) -> Results:
         metrics = self.model.val(
-            data=self.fitconfig.data_path,
+            data=self.data_path,
             save_json=True,
             plots=True,
             project="fed_yolo",

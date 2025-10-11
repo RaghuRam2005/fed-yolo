@@ -118,9 +118,9 @@ class FedTag(FedWeg):
 
     def configure_fit(self, num_supernodes:int, model_path:str, tag_dict:Dict, train_data_count:int, val_data_count:int) -> List[FedTagClient]:
         clients = []
-        client_tag_info = []
+        client_tag_info = {}
         for client_id in range(num_supernodes):
-            tag = random.choice(tag_dict.keys())
+            tag = random.choice(list(tag_dict.keys()))
             client = FedTagClient(model_path=model_path, client_id=client_id, \
                     sparsity=self.initial_sparsity, tag=tag)
             image_list = tag_dict[client.tag]

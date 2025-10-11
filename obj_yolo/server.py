@@ -98,12 +98,6 @@ class FedTagServer(FedWegServer):
     def __init__(self, model:Model, strategy:FedTag, config:ServerConfigFedTag):
         super().__init__(model=model, strategy=strategy, config=config)
     
-    def update_client_models(self):
-        return super().update_client_models()
-
-    def update_global_model(self):
-        return super().update_global_model()
-    
     def start_clients(self):
         model_path = self.config.client_model_path
         num_supernodes = self.config.num_nodes
@@ -112,15 +106,11 @@ class FedTagServer(FedWegServer):
             model_path=model_path,
             num_supernodes=num_supernodes,
             tag_dict=tags_dict,
+            train_data_count=self.config.client_train_data_count,
+            val_data_count=self.config.client_val_data_count,
         )
         self.update_client_models()
     
-    def fit_clients(self):
-        return super().fit_clients()
-    
-    def start_aggregation(self):
-        return super().start_aggregation()
-
     def start_evaluation(self):
         tags = self.strategy.get_tag_dict()
         tag_based_results = {}
