@@ -100,7 +100,7 @@ class BddData:
         if not Path(prep_data_path).exists():
             Path(prep_data_path).mkdir(parents=True)
     
-    def bbox_to_yolo(bbox, img_w, img_h, category):
+    def bbox_to_yolo(self, bbox, img_w, img_h, category):
         cls_id = BDD_ID.get(category)
         if cls_id is None:
             return None

@@ -45,9 +45,9 @@ class FedWegClient(Client):
         self.model = YOLO(model_path)
         self.client_id = client_id
         self.sparsity = sparsity
-        self.rounds_completed = 0
         self.fitconfig = fitconfig
-        self.data_path
+        self.rounds_completed = 0
+        self.data_path = None
     
     def update_model(self, parameters:Dict[str, torch.Tensor]) -> None:
         expected_keys = [k for k, _ in self.model.model.model.named_parameters()]
@@ -119,16 +119,11 @@ class FedWegClient(Client):
         return metrics
 
 class FedTagClient(FedWegClient):
-    def __init__(self, model_path:str, client_id:int, sparsity:float, tag:str) -> None:
-        super().__init__(model_path=model_path, client_id=client_id, sparsity=sparsity)
+    def __init__(self, model_path:str, client_id:int, sparsity:float, tag:str, fitconfig:FitConfig) -> None:
+        super().__init__(model_path=model_path, client_id=client_id, sparsity=sparsity, fitconfig=fitconfig)
         self.tag = tag
     
     def prepare_data(self, data_class:BddData, train_img_list:List, val_img_list:List):
         self.data_path = data_class.prepare_client_data(client_id=self.client_id, train_img_list=train_img_list, \
                                                         val_img_list=val_img_list)
     
-    def fit(self):
-        return super().fit()
-
-    def evaluate(self):
-        return super().evaluate()

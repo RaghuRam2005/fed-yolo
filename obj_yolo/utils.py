@@ -9,9 +9,6 @@ from ultralytics.engine.model import Model
 from ultralytics.engine.results import Results
 from ultralytics.utils.torch_utils import unwrap_model
 
-from .strategy import FedTag
-from .client import Client
-
 @dataclass
 class DataConfigTag:
     weather_dict:Dict[str, List]
@@ -108,7 +105,7 @@ def from_coo(t:torch.Tensor) -> torch.Tensor:
     """
     return t.to_dense()
 
-def update_sparsity_for_all_clients(fedtag:FedTag, clients:Client, results:Dict[str, float]) -> None:
+def update_sparsity_for_all_clients(fedtag, clients, results) -> None:
     sorted_results = dict(sorted(results.items(), key=lambda item: item[1], reverse=True))
     result_keys = list(sorted_results.keys())
     mid = len(result_keys) // 2

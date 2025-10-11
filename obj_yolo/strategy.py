@@ -112,8 +112,8 @@ class FedWeg(Strategy):
         return sparsity[0]
 
 class FedTag(FedWeg):
-    def __init__(self, data_class:BddData, initial_sparsity:float, min_clients:int=2,):
-        super().__init__(data_class=data_class,initial_sparsity=initial_sparsity, min_clients=min_clients)
+    def __init__(self, data_class:BddData, initial_sparsity:float, min_clients:int=2, client_epochs:int=10):
+        super().__init__(data_class=data_class,initial_sparsity=initial_sparsity, min_clients=min_clients, client_epochs=client_epochs)
         self.client_tag_info:Dict = None
 
     def configure_fit(self, num_supernodes:int, model_path:str, tag_dict:Dict, train_data_count:int, val_data_count:int) -> List[FedTagClient]:
@@ -121,8 +121,9 @@ class FedTag(FedWeg):
         client_tag_info = {}
         for client_id in range(num_supernodes):
             tag = random.choice(list(tag_dict.keys()))
+            fitconfig = FitConfig(epochs=self.client_epochs)
             client = FedTagClient(model_path=model_path, client_id=client_id, \
-                    sparsity=self.initial_sparsity, tag=tag)
+                    sparsity=self.initial_sparsity, tag=tag, fitconfig=fitconfig)
             image_list = tag_dict[client.tag]
             train_img_list = image_list[:train_data_count]
             val_img_list = image_list[:val_data_count]
