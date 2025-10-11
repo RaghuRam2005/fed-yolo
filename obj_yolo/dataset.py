@@ -168,7 +168,7 @@ class BddData:
         client_data_path = Path(self.prep_data_path) / f"client_{client_id}"
 
         client_img_path = client_data_path / "images"
-        client_label_path = client_data_path / "label"
+        client_label_path = client_data_path / "labels"
 
         (client_img_path / "train").mkdir(parents=True, exist_ok=self.exist_ok)
         (client_img_path / "val").mkdir(parents=True, exist_ok=self.exist_ok)

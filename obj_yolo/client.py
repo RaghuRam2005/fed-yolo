@@ -63,6 +63,7 @@ class FedWegClient(Client):
             self
     ):
         init_client_params = model_state(self.model)
+        expected_keys = [name for name, _ in self.model.model.model.named_parameters()]
 
         # training the local model
         if not self.data_path:
@@ -100,7 +101,6 @@ class FedWegClient(Client):
                 delta[name] = delta_tensor
 
         # validation step
-        expected_keys = [k for k, _ in init_client_params.items() if not any(k.endswith(skip) for skip in SKIP_KEYS)]
         assert expected_keys == delta.keys(), f"Client {self.client_id}: delta parameters deos not match client parameter"
 
         self.rounds_completed += 1

@@ -111,5 +111,5 @@ def update_sparsity_for_all_clients(fedtag, clients, results) -> None:
     mid = len(result_keys) // 2
     change_value_dict = {k:0.1 if i < mid else -0.1 for i, k in enumerate(result_keys)}
     for client in clients:
-        client.sparsity = fedtag.update_sparsity(rounds_completed=client.rounds_completed, change=change_value_dict[client.tag])
+        client.sparsity = fedtag.update_sparsity(current_sparsity=client.sparsity, change=change_value_dict[client.tag])
 

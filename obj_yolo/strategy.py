@@ -125,8 +125,9 @@ class FedTag(FedWeg):
             client = FedTagClient(model_path=model_path, client_id=client_id, \
                     sparsity=self.initial_sparsity, tag=tag, fitconfig=fitconfig)
             image_list = tag_dict[client.tag]
+            random.shuffle(image_list)
             train_img_list = image_list[:train_data_count]
-            val_img_list = image_list[:val_data_count]
+            val_img_list = image_list[train_data_count:train_data_count+val_data_count]
             client.prepare_data(
                 data_class=self.data_class,
                 train_img_list=train_img_list,
@@ -139,11 +140,11 @@ class FedTag(FedWeg):
         self.client_tag_info = client_tag_info
         return clients
     
-    def update_sparsity(self, rounds_participated:int, change:float) -> float:
+    def update_sparsity(self, current_sparsity:float, change:float) -> float:
         min_sparsity = 0.2
         max_sparsity = 0.8
 
-        new_sparsity = min_sparsity + (rounds_participated * change)
+        new_sparsity = current_sparsity + change
         sparsity = torch.clip([new_sparsity], min=min_sparsity, max=max_sparsity)
         return sparsity[0]
 

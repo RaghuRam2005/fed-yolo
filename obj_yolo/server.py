@@ -45,10 +45,9 @@ class FedWegServer(Server):
         self.clients = None
 
     def update_global_model(self, parameters:Dict[str, torch.Tensor]) -> None:
-        expected_keys = [k for k, _ in self.global_state.keys() if not k.endswith(('running_mean', 'running_var', 'num_batches_tracked'))]
-        param_keys = [k for k, _ in parameters.keys() if not k.endswith(('running_mean', 'running_var', 'num_batches_tracked'))]
-        assert expected_keys == param_keys, "keys doesn't match while updating the global model"
-        self.global_model.model.model.load_state_dict(parameters)
+        model_keys = self.global_state.keys()
+        assert all(key in model_keys for key in parameters.keys()), "Some aggregation keys are not in the global model"
+        self.global_model.model.model.load_state_dict(parameters, strict=False)
         self.global_state = model_state(self.global_model)
 
     def update_client_models(self) -> None:
