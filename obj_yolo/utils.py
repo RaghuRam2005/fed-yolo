@@ -11,7 +11,11 @@ from ultralytics.utils.torch_utils import unwrap_model
 
 from .strategy import FedTag
 from .client import Client
-from .dataset import KittiData, BddData
+
+@dataclass
+class DataConfigTag:
+    weather_dict:Dict[str, List]
+    scene_dict:Dict[str, List]
 
 @dataclass
 class ServerConfigFedWeg:
@@ -19,15 +23,17 @@ class ServerConfigFedWeg:
     Sever Configuration
     """
     client_model_path:str
-    client_data_paths:List[str]
+    client_train_data_count:int
+    client_val_data_count:int
     communication_rounds:int=2
     num_nodes:int=2
 
 @dataclass
 class ServerConfigFedTag:
     client_model_path:str
-    client_data_path:List[str]
-    client_tags:List[str]
+    client_tag_dict:Dict
+    client_train_data_count:int
+    client_val_data_count:int
     communication_rounds:int=2
     num_nodes:int=2
 
@@ -36,7 +42,6 @@ class FitConfig:
     """
     Fit configuration class for clients
     """
-    data_path:str
     epochs:int=10
 
 @dataclass
@@ -110,6 +115,4 @@ def update_sparsity_for_all_clients(fedtag:FedTag, clients:Client, results:Dict[
     change_value_dict = {k:0.1 if i < mid else -0.1 for i, k in enumerate(result_keys)}
     for client in clients:
         client.sparsity = fedtag.update_sparsity(rounds_completed=client.rounds_completed, change=change_value_dict[client.tag])
-
-
 

@@ -8,6 +8,7 @@ import torch
 from ultralytics.engine.results import Results
 
 from .client import FedWegClient, FedTagClient
+from .dataset import KittiData, BddData
 from .utils import (
     FitConfig,
     FitResFedWeg,
@@ -28,20 +29,25 @@ class Strategy(ABC):
         pass
 
 class FedWeg(Strategy):
-    def __init__(self, client_data_paths:List[str], initial_sparsity:float=0.2, min_clients:int=2, client_epochs:int=10) -> None:
+    def __init__(self, data_class:KittiData, initial_sparsity:float=0.2, min_clients:int=2, client_epochs:int=10) -> None:
         self.min_clients_for_aggregation = min_clients
         self.initial_sparsity=initial_sparsity
-        self.client_data_paths = client_data_paths
+        self.data_class = data_class
         self.client_epochs = client_epochs
 
-    def configure_fit(self, num_supernodes:int, model_path:str) -> List[FedWegClient]:
+    def configure_fit(self, num_supernodes:int, model_path:str, train_data_count:int, val_data_count:int) -> List[FedWegClient]:
         if self.min_clients_for_aggregation < num_supernodes:
             raise Exception(f"Min Clients for aggregation ({self.min_clients_for_aggregation}), exceeds the given clients({num_supernodes})")
         
         clients = []
         for x in range(num_supernodes):
-            fitconfig = FitConfig(data_path=self.client_data_paths[x], epochs=self.client_epochs)
+            fitconfig = FitConfig(epochs=self.client_epochs)
             client = FedWegClient(model_path=model_path, client_id=x, sparsity=self.initial_sparsity, fitconfig=fitconfig)
+            client.prepare_data(
+                data_class=self.data_class,
+                train_data_count=train_data_count,
+                val_data_count=val_data_count
+            )
             clients.append(client)
         return clients
     
@@ -106,22 +112,30 @@ class FedWeg(Strategy):
         return sparsity[0]
 
 class FedTag(FedWeg):
-    def __init__(self, initial_sparsity:float, min_clients:int=2):
-        super().__init__(initial_sparsity=initial_sparsity, min_clients=min_clients)
-        self.tags:Optional[Dict] = None
+    def __init__(self, data_class:BddData, initial_sparsity:float, min_clients:int=2,):
+        super().__init__(data_class=data_class,initial_sparsity=initial_sparsity, min_clients=min_clients)
+        self.client_tag_info:Dict = None
 
-    def configure_fit(self, num_supernodes:int, model_path:str, tags:List) -> List[FedTagClient]:
-        tag_dict = {}
+    def configure_fit(self, num_supernodes:int, model_path:str, tag_dict:Dict, train_data_count:int, val_data_count:int) -> List[FedTagClient]:
         clients = []
+        client_tag_info = []
         for client_id in range(num_supernodes):
-            tag = random.choice(tags)
+            tag = random.choice(tag_dict.keys())
             client = FedTagClient(model_path=model_path, client_id=client_id, \
                     sparsity=self.initial_sparsity, tag=tag)
-            tag_clients = tag_dict.get(tag, [])
-            tag_clients.append(client_id)
-            tag_dict[tag] = tag_clients
+            image_list = tag_dict[client.tag]
+            train_img_list = image_list[:train_data_count]
+            val_img_list = image_list[:val_data_count]
+            client.prepare_data(
+                data_class=self.data_class,
+                train_img_list=train_img_list,
+                val_img_list=val_img_list,
+            )
+            tag_info = client_tag_info.get(client.tag, [])
+            tag_info.append(client.client_id)
+            client_tag_info[client.tag] = tag_info
             clients.append(client)
-        self.tags = tag_dict
+        self.client_tag_info = client_tag_info
         return clients
     
     def update_sparsity(self, rounds_participated:int, change:float) -> float:
@@ -133,5 +147,5 @@ class FedTag(FedWeg):
         return sparsity[0]
 
     def get_tag_dict(self):
-        return self.tags
+        return self.client_tag_info
     

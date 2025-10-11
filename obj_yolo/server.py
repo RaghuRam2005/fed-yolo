@@ -7,8 +7,13 @@ import torch
 from ultralytics.engine.model import Model
 from ultralytics.engine.results import Results
 
-from .utils import ServerConfigFedWeg, model_state, FitConfig
 from .strategy import FedWeg, FedTag
+from .utils import (
+    ServerConfigFedTag,
+    ServerConfigFedWeg,
+    model_state,
+    update_sparsity_for_all_clients,
+)
 
 class Server(ABC):
     @abstractmethod
@@ -21,6 +26,10 @@ class Server(ABC):
 
     @abstractmethod
     def start_clients(self):
+        pass
+
+    @abstractmethod
+    def start_aggregation(self):
         pass
 
     @abstractmethod
@@ -52,7 +61,8 @@ class FedWegServer(Server):
         model_path = self.config.client_model_path
         num_supernodes = self.config.num_nodes
         self.clients = self.strategy.configure_fit(model_path=model_path, num_supernodes=\
-                num_supernodes)
+                num_supernodes, train_data_count=self.config.client_train_data_count, val_data_count=\
+                    self.config.client_val_data_count)
         self.update_client_models()
 
     def fit_clients(self) -> List:
@@ -79,6 +89,57 @@ class FedWegServer(Server):
             results = client.evaluate()
             eval_results.append(results)
         return eval_results
+    
+    def update_sparsity(self):
+        for client in self.clients:
+            client.sparsity = self.strategy.update_sparsity(rounds_participated=client.rounds_completed)
 
-class FedTagServer(Server):
-    def __init__(self, model:Model, strategy:FedTag, config:):
+class FedTagServer(FedWegServer):
+    def __init__(self, model:Model, strategy:FedTag, config:ServerConfigFedTag):
+        super().__init__(model=model, strategy=strategy, config=config)
+    
+    def update_client_models(self):
+        return super().update_client_models()
+
+    def update_global_model(self):
+        return super().update_global_model()
+    
+    def start_clients(self):
+        model_path = self.config.client_model_path
+        num_supernodes = self.config.num_nodes
+        tags_dict = self.config.client_tag_dict
+        self.clients = self.strategy.configure_fit(
+            model_path=model_path,
+            num_supernodes=num_supernodes,
+            tag_dict=tags_dict,
+        )
+        self.update_client_models()
+    
+    def fit_clients(self):
+        return super().fit_clients()
+    
+    def start_aggregation(self):
+        return super().start_aggregation()
+
+    def start_evaluation(self):
+        tags = self.strategy.get_tag_dict()
+        tag_based_results = {}
+        
+        if not self.clients:
+            raise Exception("Clients not initialized for evaluation.")
+
+        client_map = {client.client_id: client for client in self.clients}
+
+        for tag, client_ids in tags.items():
+            if client_ids:
+                selected_client_id = client_ids[0]
+                selected_client = client_map.get(selected_client_id)
+                
+                if selected_client:
+                    results = selected_client.evaluate()
+                    map_score = results.box.map
+                    tag_based_results[tag] = map_score
+        return tag_based_results
+
+    def update_sparsity(self, results:Dict[str, float]) -> None:
+        update_sparsity_for_all_clients(fedtag=self.strategy, clients=self.clients, results=results)

@@ -1,6 +1,7 @@
 #client.py
 import os
-from typing import Dict
+from pathlib import Path
+from typing import Dict, List
 from abc import ABC, abstractmethod
 
 import torch
@@ -11,6 +12,7 @@ from ultralytics.engine.model import Model
 from ultralytics.engine.results import Results
 from ultralytics.utils.torch_utils import unwrap_model
 
+from .dataset import KittiData, BddData
 from .utils import (
     FitResFedWeg,
     FitConfig,
@@ -45,15 +47,17 @@ class FedWegClient(Client):
         self.sparsity = sparsity
         self.rounds_completed = 0
         self.fitconfig = fitconfig
+        self.data_path
     
     def update_model(self, parameters:Dict[str, torch.Tensor]) -> None:
         expected_keys = [k for k, _ in self.model.model.model.named_parameters()]
         parameters_keys = [k for k, _ in parameters.items() if not any(k.endswith(skip) for skip in SKIP_KEYS)]
         assert expected_keys == parameters_keys, f"Client {self.client_id} Error: update model parameter keys and model keys doesn't match"
         self.model.model.model.load_state_dict(parameters, strict=True)
-
-    def prepare_data(self):
-        
+    
+    def prepare_data(self, data_class:KittiData, train_data_count:int, val_data_count:int) -> None:
+        self.data_path = data_class.prepare_client_data(client_id=self.client_id, train_data_count=train_data_count,\
+                                                        val_data_count=val_data_count)
 
     def fit(
             self
@@ -61,6 +65,10 @@ class FedWegClient(Client):
         init_client_params = model_state(self.model)
 
         # training the local model
+        if not self.data_path:
+            raise Exception(f"client {self.client_id}:Training data path not found")
+        elif not Path(self.data_path).exists():
+            raise Exception(f"client {self.client_id}: Data not found at {self.data_path}")
         results = client_train(
                 model=self.model,
                 data_path=self.fitconfig.data_path,
@@ -114,3 +122,13 @@ class FedTagClient(FedWegClient):
     def __init__(self, model_path:str, client_id:int, sparsity:float, tag:str) -> None:
         super().__init__(model_path=model_path, client_id=client_id, sparsity=sparsity)
         self.tag = tag
+    
+    def prepare_data(self, data_class:BddData, train_img_list:List, val_img_list:List):
+        self.data_path = data_class.prepare_client_data(client_id=self.client_id, train_img_list=train_img_list, \
+                                                        val_img_list=val_img_list)
+    
+    def fit(self):
+        return super().fit()
+
+    def evaluate(self):
+        return super().evaluate()
