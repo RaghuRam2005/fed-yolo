@@ -37,7 +37,7 @@ class Server(ABC):
         pass
     
 class FedWegServer(Server):
-    def __init__(self, model:Model, strategy:FedWeg, config:ServerConfigFedWeg) -> None:
+    def __init__(self, model:Model, strategy:FedWeg, config) -> None:
         self.global_model = model
         self.global_state = model_state(self.global_model)
         self.strategy = strategy
@@ -69,7 +69,7 @@ class FedWegServer(Server):
         if not self.clients:
             raise Exception("clients not found while running fit")
         for client in self.clients:
-            result = client.fit()
+            result = client.fit(global_state=self.global_state)
             results.append(result)
         self.results = results
         return results
@@ -94,7 +94,7 @@ class FedWegServer(Server):
             client.sparsity = self.strategy.update_sparsity(rounds_participated=client.rounds_completed)
 
 class FedTagServer(FedWegServer):
-    def __init__(self, model:Model, strategy:FedTag, config:ServerConfigFedTag):
+    def __init__(self, model:Model, strategy:FedTag, config):
         super().__init__(model=model, strategy=strategy, config=config)
     
     def start_clients(self):
@@ -120,14 +120,21 @@ class FedTagServer(FedWegServer):
         client_map = {client.client_id: client for client in self.clients}
 
         for tag, client_ids in tags.items():
-            if client_ids:
-                selected_client_id = client_ids[0]
-                selected_client = client_map.get(selected_client_id)
+            tag_scores = []
+            if not client_ids:
+                continue
                 
-                if selected_client:
-                    results = selected_client.evaluate()
-                    map_score = results.box.map
-                    tag_based_results[tag] = map_score
+            for client_id in client_ids:
+                client = client_map.get(client_id)
+                if client:
+                    results = client.evaluate()
+                    tag_scores.append(results.box.map)
+            
+            if tag_scores:
+                # Calculate the average score for the tag
+                average_map_score = sum(tag_scores) / len(tag_scores)
+                tag_based_results[tag] = average_map_score
+                
         return tag_based_results
 
     def update_sparsity(self, results:Dict[str, float]) -> None:

@@ -161,7 +161,7 @@ class BddData:
         return weather_dict, scene_dict
     
     def prepare_client_data(self, client_id:int, train_img_list:List[str], val_img_list:List[str]) -> str:
-        base_img_path = Path(self.base_data_path) / "images" / "100k" / "train"
+        base_img_path = Path(self.base_data_path) / "100k" / "train"
         if not Path(base_img_path).exists():
             raise Exception(f"base images not found at {base_img_path}")
 
@@ -207,5 +207,3 @@ class BddData:
             yaml.dump(content, f, sort_keys=False)
 
         return client_yaml_path
-
-

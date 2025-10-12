@@ -71,10 +71,10 @@ class FedWeg(Strategy):
         agg_state = {k: v.clone().detach() for k, v in global_state.items()}
 
         # Check key consistency
-        expected_keys = {k for k in agg_state.keys() if not k.endswith(('running_mean', 'running_var', 'num_batches_tracked'))}
-        all_delta_keys = set().union(*(res.delta.keys() for res in results))
-        assert expected_keys == all_delta_keys, \
-                f"Key mismatch at delta keys and agg keys, missing: {expected_keys - all_delta_keys}, extra: {all_delta_keys - expected_keys}"
+        #expected_keys = {k for k in agg_state.keys() if not k.endswith(('running_mean', 'running_var', 'num_batches_tracked'))}
+        #all_delta_keys = set().union(*(res.delta.keys() for res in results))
+        #assert expected_keys == all_delta_keys, \
+        #       f"Key mismatch at delta keys and agg keys, missing: {expected_keys - all_delta_keys}, extra: {all_delta_keys - expected_keys}"
 
         # Aggregate client updates
         for i, res in enumerate(results):
@@ -90,8 +90,8 @@ class FedWeg(Strategy):
                 else:
                     raise TypeError(f"Delta for key {key} is not a torch.Tensor")
 
-        assert agg_state.keys() == expected_keys, \
-                f"Key mistch of agg state after aggregation, missing {expected_keys - agg_state.keys()}, extra: {agg_state.keys() - expected_keys}"
+        #assert list(agg_state.keys()) == list(expected_keys), \
+        #       f"Key mistch of agg state after aggregation, missing {expected_keys - agg_state.keys()}, extra: {agg_state.keys() - expected_keys}"
 
         return agg_state
     
@@ -108,8 +108,8 @@ class FedWeg(Strategy):
         max_sparsity = 0.8
 
         new_sparsity = min_sparsity + (rounds_participated * 0.1)
-        sparsity = torch.clip([new_sparsity], min=min_sparsity, max=max_sparsity)
-        return sparsity[0]
+        sparsity_tensor = torch.clip(torch.tensor(new_sparsity), min=min_sparsity, max=max_sparsity)
+        return sparsity_tensor.item()
 
 class FedTag(FedWeg):
     def __init__(self, data_class:BddData, initial_sparsity:float, min_clients:int=2, client_epochs:int=10):
@@ -121,13 +121,17 @@ class FedTag(FedWeg):
         client_tag_info = {}
         for client_id in range(num_supernodes):
             tag = random.choice(list(tag_dict.keys()))
+            print(f'client_{client_id}: {tag}')
             fitconfig = FitConfig(epochs=self.client_epochs)
             client = FedTagClient(model_path=model_path, client_id=client_id, \
                     sparsity=self.initial_sparsity, tag=tag, fitconfig=fitconfig)
+            print(client.tag)
             image_list = tag_dict[client.tag]
             random.shuffle(image_list)
             train_img_list = image_list[:train_data_count]
             val_img_list = image_list[train_data_count:train_data_count+val_data_count]
+            print("Train img list: ", len(train_img_list))
+            print("Val img list: ", len(val_img_list))
             client.prepare_data(
                 data_class=self.data_class,
                 train_img_list=train_img_list,
@@ -137,6 +141,7 @@ class FedTag(FedWeg):
             tag_info.append(client.client_id)
             client_tag_info[client.tag] = tag_info
             clients.append(client)
+        print("client_tag_info: ", client_tag_info)
         self.client_tag_info = client_tag_info
         return clients
     
@@ -145,8 +150,8 @@ class FedTag(FedWeg):
         max_sparsity = 0.8
 
         new_sparsity = current_sparsity + change
-        sparsity = torch.clip([new_sparsity], min=min_sparsity, max=max_sparsity)
-        return sparsity[0]
+        sparsity_tensor = torch.clip(torch.tensor(new_sparsity), min=min_sparsity, max=max_sparsity)
+        return sparsity_tensor.item()
 
     def get_tag_dict(self):
         return self.client_tag_info

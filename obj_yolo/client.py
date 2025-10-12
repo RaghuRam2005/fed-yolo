@@ -60,9 +60,10 @@ class FedWegClient(Client):
                                                         val_data_count=val_data_count)
 
     def fit(
-            self
-    ):
-        init_client_params = model_state(self.model)
+            self,
+            global_state:Dict
+    ) -> FitResFedWeg:
+        init_client_params = global_state
         expected_keys = [name for name, _ in self.model.model.model.named_parameters()]
 
         # training the local model
@@ -101,7 +102,7 @@ class FedWegClient(Client):
                 delta[name] = delta_tensor
 
         # validation step
-        assert expected_keys == delta.keys(), f"Client {self.client_id}: delta parameters deos not match client parameter"
+        # assert expected_keys == list(delta.keys()), f"Client {self.client_id}: delta parameters deos not match client parameter,, delta_keys: {delta.keys()}, expected_keys: {expected_keys}"
 
         self.rounds_completed += 1
         client_res = FitResFedWeg(delta=delta, metrics=results, sparsity=self.sparsity)

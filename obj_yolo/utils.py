@@ -67,7 +67,6 @@ def client_train(model:Model, data_path:str, client_id:int, epochs:int) -> Resul
         project="fed_yolo",
         name=f"client_{client_id}_train",
         exist_ok=True,
-        pretrained="yolo11n.pt",
         optimizer='auto',
         seed=32,
         deterministic=True,
