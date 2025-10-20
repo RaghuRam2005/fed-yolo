@@ -64,7 +64,7 @@ class FedWegClient(Client):
             global_state:Dict
     ) -> FitResFedWeg:
         init_client_params = global_state
-        expected_keys = [name for name, _ in self.model.model.model.named_parameters()]
+        #expected_keys = [name for name, _ in self.model.model.model.named_parameters()]
 
         # training the local model
         if not self.data_path:

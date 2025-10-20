@@ -18,48 +18,32 @@ from obj_yolo import (
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def warm_up_server_model(model: YOLO, data_class, base_data_path, prep_data_path):
-    """
-    Performs a brief training loop on the server model to ensure all layers,
-    including biases, are initialized before federated learning begins.
-    This resolves potential state_dict key mismatches.
-    """
+def warm_up_server_model(model: YOLO, data_class, image_dict=None):
     logging.info("-------------------- WARMING UP SERVER MODEL --------------------")
-    # Use a unique directory for server warm-up data to avoid conflicts
-    warmup_prep_path = prep_data_path / "server_warmup"
-    server_data_provider = data_class(
-        base_data_path=str(base_data_path),
-        prep_data_path=str(warmup_prep_path),
-        exist_ok=True
-    )
-
-    # Prepare a small dataset for the server warm-up
-    if isinstance(server_data_provider, KittiData):
-        warmup_data_yaml = server_data_provider.prepare_client_data(
+    if isinstance(data_class, KittiData):
+        warmup_data_yaml = data_class.prepare_client_data(
             client_id=100, train_data_count=16, val_data_count=16
         )
-    elif isinstance(server_data_provider, BddData):
-        # BddData needs a list of images, so we generate a small one.
-        _, scene_dict = server_data_provider.create_tag_dicts()
-        image_list = next(iter(scene_dict.values()))
-        warmup_data_yaml = server_data_provider.prepare_client_data(
+    elif isinstance(data_class, BddData):
+        _, scene_dict = data_class.create_tag_dicts()
+        image_list = next(iter(image_dict.values()))
+        warmup_data_yaml = data_class.prepare_client_data(
             client_id=100, train_img_list=image_list[:16], val_img_list=image_list[16:32]
         )
     else:
         raise TypeError(f"Unsupported data class for model warm-up: {type(data_class)}")
 
-    # Train for one epoch to initialize all model parameters
     model.train(
         data=warmup_data_yaml,
         epochs=5,
         batch=4,
-        imgsz=320,  # Smaller image size for faster warm-up
+        imgsz=320, 
         project="fed_yolo",
         name="server_model_init",
         exist_ok=True,
         save=False,
         plots=False,
-        verbose=False  # Keep the log clean from training details
+        verbose=False
     )
     logging.info("-------------------- SERVER MODEL WARM-UP COMPLETE --------------------")
     return model
@@ -67,7 +51,7 @@ def warm_up_server_model(model: YOLO, data_class, base_data_path, prep_data_path
 def fedweg_kitti_experiment():
     """Simulation of FedWeg with the KITTI dataset."""
     logging.info("==================== STARTING FEDWEG KITTI EXPERIMENT ====================")
-    # --- Configuration ---
+    
     communication_rounds = 3
     initial_sparsity = 0.2
     super_num_nodes = 4
@@ -82,12 +66,10 @@ def fedweg_kitti_experiment():
     train_data_count = 500
     val_data_count = 100
 
-    # --- Initialization ---
     model = YOLO(str(yolo_config)).load("yolo11n.pt")
     data_class = KittiData(base_data_path=str(base_data_path), prep_data_path=str(prep_data_path), exist_ok=True)
 
-    # --- Server Model Warm-up (Fix for bias layers) ---
-    model = warm_up_server_model(model, KittiData, base_data_path, prep_data_path)
+    model = warm_up_server_model(model, KittiData)
 
     strategy = FedWeg(
         data_class=data_class,
@@ -110,7 +92,6 @@ def fedweg_kitti_experiment():
     logging.info("-------------------- CREATING CLIENTS -------------------------")
     server.start_clients()
 
-    # --- Federated Learning Loop ---
     for r in range(server.config.communication_rounds):
         logging.info(f"--------------------- COMMUNICATION ROUND {r + 1}/{communication_rounds} -------------------")
         results = server.fit_clients()
@@ -129,7 +110,6 @@ def fedweg_kitti_experiment():
         server.update_sparsity()
         logging.info(f"Round {r + 1}: Client sparsities updated for next round.")
 
-    # --- Final Evaluation ---
     logging.info("------------------ FINAL EVALUATION -----------------")
     final_eval_results = server.start_evaluation()
     for i, res in enumerate(final_eval_results):
@@ -139,7 +119,7 @@ def fedweg_kitti_experiment():
 def fedweg_bdd100k_experiment():
     """Simulation of FedWeg with the BDD100k dataset."""
     logging.info("==================== STARTING FEDWEG BDD100K EXPERIMENT ====================")
-    # --- Configuration ---
+    
     communication_rounds = 3
     initial_sparsity = 0.2
     super_num_nodes = 4
@@ -154,13 +134,11 @@ def fedweg_bdd100k_experiment():
     train_data_count = 1000
     val_data_count = 200
 
-    # --- Initialization ---
     model = YOLO(str(yolo_config)).load("yolo11n.pt")
     logging.warning("FedWeg with BDD100k assumes data is in YOLO format (like KITTI's 'image_2', 'labels' folders).")
     data_class = KittiData(base_data_path=str(base_data_path), prep_data_path=str(prep_data_path), exist_ok=True)
     
-    # --- Server Model Warm-up ---
-    model = warm_up_server_model(model, KittiData, base_data_path, prep_data_path)
+    model = warm_up_server_model(model, KittiData)
 
     strategy = FedWeg(data_class=data_class, initial_sparsity=initial_sparsity, min_clients=min_clients, client_epochs=client_epochs)
     server_config = ServerConfigFedWeg(
@@ -175,7 +153,6 @@ def fedweg_bdd100k_experiment():
     logging.info("-------------------- FEDWEG (BDD100k) Server Started --------------------")
     server.start_clients()
 
-    # --- Federated Learning Loop ---
     for r in range(server.config.communication_rounds):
         logging.info(f"--------------------- COMMUNICATION ROUND {r + 1}/{communication_rounds} -------------------")
         server.fit_clients()
@@ -193,10 +170,10 @@ def fedweg_bdd100k_experiment():
         logging.info(f"  Final performance of Client {i}: mAP50-95={res.box.map:.4f}")
     logging.info("==================== FEDWEG BDD100K EXPERIMENT COMPLETE ====================")
 
-def fedtag_bdd100k_scene_experiment():
+def fedtag_scene_experiment():
     """Simulation of FedTag with the BDD100k dataset, tagged by scene."""
     logging.info("==================== STARTING FEDTAG BDD100K (SCENE) EXPERIMENT ====================")
-    # --- Configuration ---
+    
     communication_rounds = 3
     initial_sparsity = 0.2
     super_num_nodes = 5
@@ -211,7 +188,6 @@ def fedtag_bdd100k_scene_experiment():
     train_data_count = 1000
     val_data_count = 200
 
-    # --- Initialization ---
     model = YOLO(str(yolo_config)).load("yolo11n.pt")
     data_class = BddData(base_data_path=str(base_data_path), prep_data_path=str(prep_data_path), exist_ok=True)
     _, scene_dict = data_class.create_tag_dicts()
@@ -221,8 +197,7 @@ def fedtag_bdd100k_scene_experiment():
         scene_dict.pop(key)
     logging.info(f"Usable scenes for training: {list(scene_dict.keys())}")
 
-    # --- Server Model Warm-up ---
-    model = warm_up_server_model(model, BddData, base_data_path, prep_data_path)
+    model = warm_up_server_model(model=model, data_class=data_class, image_dict=scene_dict)
 
     strategy = FedTag(data_class=data_class, initial_sparsity=initial_sparsity, min_clients=min_clients, client_epochs=client_epochs)
     server_config = ServerConfigFedTag(
@@ -238,7 +213,6 @@ def fedtag_bdd100k_scene_experiment():
     logging.info("-------------------- FEDTAG (BDD100k, Scene) Server Started --------------------")
     server.start_clients()
 
-    # --- Federated Learning Loop ---
     for r in range(server.config.communication_rounds):
         logging.info(f"--------------------- COMMUNICATION ROUND {r + 1}/{communication_rounds} -------------------")
         server.fit_clients()
@@ -258,7 +232,7 @@ def fedtag_bdd100k_scene_experiment():
 def fedtag_weather_experiment():
     """Simulation of FedTag with the BDD100k dataset, tagged by weather."""
     logging.info("==================== STARTING FEDTAG BDD100K (WEATHER) EXPERIMENT ====================")
-    # --- Configuration ---
+    
     communication_rounds = 2
     initial_sparsity = 0.2
     super_num_nodes = 2
@@ -273,7 +247,6 @@ def fedtag_weather_experiment():
     train_data_count = 500
     val_data_count = 100
 
-    # --- Initialization ---
     model = YOLO(str(yolo_config)).load("yolo11n.pt")
     data_class = BddData(base_data_path=str(base_data_path), prep_data_path=str(prep_data_path), exist_ok=True)
     weather_dict, _ = data_class.create_tag_dicts()
@@ -281,10 +254,11 @@ def fedtag_weather_experiment():
     keys_to_remove = [k for k, v in weather_dict.items() if len(v) <= train_data_count + val_data_count]
     for key in keys_to_remove:
         weather_dict.pop(key)
+    if not weather_dict:
+        return
     logging.info(f"Usable weather conditions for training: {list(weather_dict.keys())}")
 
-    # --- Server Model Warm-up ---
-    #model = warm_up_server_model(model, BddData, base_data_path, prep_data_path)
+    model = warm_up_server_model(model, data_class, weather_dict)
 
     strategy = FedTag(data_class=data_class, initial_sparsity=initial_sparsity, min_clients=min_clients, client_epochs=client_epochs)
     server_config = ServerConfigFedTag(
@@ -300,7 +274,6 @@ def fedtag_weather_experiment():
     logging.info("-------------------- FEDTAG (BDD100k, Weather) Server Started --------------------")
     server.start_clients()
 
-    # --- Federated Learning Loop ---
     for r in range(server.config.communication_rounds):
         logging.info(f"--------------------- COMMUNICATION ROUND {r + 1}/{communication_rounds} -------------------")
         server.fit_clients()
@@ -320,7 +293,6 @@ def fedtag_weather_experiment():
     logging.info("==================== FEDTAG BDD100K (WEATHER) EXPERIMENT COMPLETE ====================")
 
 if __name__ == "__main__":
-    # You can uncomment the experiment you wish to run.
     fedtag_weather_experiment()
     # fedtag_bdd100k_scene_experiment()
     # fedweg_kitti_experiment()
