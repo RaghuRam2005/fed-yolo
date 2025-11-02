@@ -8,6 +8,7 @@ from flwr.clientapp import ClientApp
 
 from obj_yolo.utils import train as train_fn
 from obj_yolo.utils import test as test_fn
+from obj_yolo.utils import eval_train as train_val_fn
 
 from ultralytics import YOLO
 from ultralytics.utils.torch_utils import unwrap_model
@@ -85,6 +86,15 @@ def evaluate(msg:Message, context:Context):
     data_path = Path(BASE_DIR_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "data.yaml"
     if not data_path.exists():
         raise Exception(f"Data Not prepared Exception: Client-{partition_id}")
+    
+    # we are training model for warming up after loading the aggregation state
+    eval_train = train_val_fn(
+        partition_id=partition_id,
+        model=model,
+        data_path=data_path,
+        local_epochs=5,
+        lr0=0.01,
+    )
     
     eval_metrics = test_fn(
         partition_id=partition_id,
