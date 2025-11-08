@@ -43,7 +43,7 @@ def main(grid:Grid, context:Context) -> None:
         for k, v in state_dict.items()
         if isinstance(v, torch.Tensor)
     }
-    arrays = ArrayRecord(tensor_state_dict)
+    arrays = ArrayRecord(tensor_state_dict, keep_input=True)
 
     # Initialize FedAvg strategy
     strategy = CustomFedAvg(fraction_fit=fraction_fit, fraction_evaluate=1.0, min_fit_clients=2, min_evaluate_clients=2, min_available_clients=2)
