@@ -5,10 +5,11 @@ from pathlib import Path
 import torch
 from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
-from flwr.server.strategy import FedAvg
 
 from ultralytics import YOLO
 from ultralytics.utils.torch_utils import unwrap_model
+
+from obj_yolo.strategy import CustomFedAvg
 
 server_app = ServerApp()
 
@@ -45,7 +46,7 @@ def main(grid:Grid, context:Context) -> None:
     arrays = ArrayRecord(state_dict)
 
     # Initialize FedAvg strategy
-    strategy = FedAvg(fraction_train=fraction_train, fraction_evaluate=1.0, min_train_nodes=2, min_evaluate_nodes=2)
+    strategy = CustomFedAvg(fraction_train=fraction_train, fraction_evaluate=1.0, min_train_nodes=2, min_evaluate_nodes=2)
 
     # Start strategy, run FedAvg for `num_rounds`
     result = strategy.start(
