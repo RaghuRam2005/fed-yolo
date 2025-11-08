@@ -32,7 +32,10 @@ def train(msg:Message, context:Context):
 
     # load new model instance everytime we run a client train
     model = YOLO(YOLO_CONFIG)
-    model.load_state_dict(msg.content['arrays'].to_torch_state_dict())
+    new_arrays = msg.contet['arrays'].to_torch_state_dict()
+    state_dict = model.model.state_dict().copy()
+    state_dict.update(new_arrays)
+    model.model.load_state_dict(state_dict, strict=True)
 
     # load configuration
     partition_id = context.node_config["partition-id"]
@@ -52,9 +55,9 @@ def train(msg:Message, context:Context):
 
     # construct the state dict of the model
     unwrapped_model = unwrap_model(model)
-    state_dict = unwrapped_model.state_dict()
+    state_dict = unwrapped_model.model.state_dict()
     detached_weights = {
-        k: v.detach()
+        k: v.cpu().numpy()
         for k, v in state_dict.items()
         if isinstance(v, torch.Tensor)
     }
@@ -78,7 +81,10 @@ def evaluate(msg:Message, context:Context):
 
     # load new model instance everytime we run a client train
     model = YOLO(YOLO_CONFIG)
-    model.load_state_dict(msg.content['arrays'].to_torch_state_dict())
+    new_arrays = msg.contet['arrays'].to_torch_state_dict()
+    state_dict = model.model.state_dict().copy()
+    state_dict.update(new_arrays)
+    model.model.load_state_dict(state_dict, strict=True)
 
     # load the data
     partition_id = context.node_config["partition-id"]
@@ -88,13 +94,13 @@ def evaluate(msg:Message, context:Context):
         raise Exception(f"Data Not prepared Exception: Client-{partition_id}")
     
     # we are training model for warming up after loading the aggregation state
-    eval_train = train_val_fn(
-        partition_id=partition_id,
-        model=model,
-        data_path=data_path,
-        local_epochs=5,
-        lr0=0.01,
-    )
+    #eval_train = train_val_fn(
+    #    partition_id=partition_id,
+    #    model=model,
+    #    data_path=data_path,
+    #    local_epochs=2,
+    #    lr0=0.01,
+    #)
     
     eval_metrics = test_fn(
         partition_id=partition_id,
