@@ -7,7 +7,7 @@ from typing import OrderedDict, Tuple, Union, Optional
 
 from flwr.common import Parameters, parameters_to_ndarrays, FitRes, Scalar
 from flwr.server.client_proxy import ClientProxy
-from flwr.serverapp.strategy import FedAvg
+from flwr.serverapp.strategy import FedAvg, FedAdam
 
 import torch
 
@@ -72,6 +72,12 @@ def get_section_parameters(state_dict:OrderedDict) -> Tuple[dict, dict, dict]:
     return backbone_weights, neck_weights, head_weights
 
 class CustomFedAvg(FedAvg):
+    """
+    FedAvg class that works with YOLO architecture
+
+    Some parts of this class is obtained from "UltraFlwr"
+    refer to: https://github.com/KCL-BMEIS/UltraFlwr/blob/main
+    """
     def __init__(self, *, fraction_train = 1, fraction_evaluate = 1, min_train_nodes = 2, min_evaluate_nodes = 2, min_available_nodes = 2):
         super().__init__(fraction_train=fraction_train, fraction_evaluate=fraction_evaluate, min_train_nodes=min_train_nodes, min_evaluate_nodes=min_evaluate_nodes, min_available_nodes=min_available_nodes)
         BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
@@ -115,6 +121,30 @@ class CustomFedAvg(FedAvg):
         failures: list[Union[tuple[ClientProxy, FitRes], BaseException]],
     ) -> tuple[Optional[Parameters], dict[str, Scalar]]:
         """Aggregate model weights using weighted average and store checkpoint."""
+        aggregated_parameters, aggregated_metrics = super().aggregate_fit(
+            server_round, results, failures
+        )
+
+        if aggregated_parameters is not None:
+            net = self.load_and_update_model(aggregated_parameters)            
+            full_parameters = {k:val.detach() for k, val in net.model.state_dict().items()}
+            return full_parameters, aggregated_metrics
+            
+        return aggregated_parameters, aggregated_metrics
+
+class CustomFedAdam(FedAdam, CustomFedAvg):
+    """
+    FedAdam Class that works with YOLO architecture
+    
+    Some parts of this class is obtained from "UltraFlwr"
+    refer to: https://github.com/KCL-BMEIS/UltraFlwr/blob/main
+    """
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: list[tuple[ClientProxy, FitRes]],
+        failures: list[Union[tuple[ClientProxy, FitRes], BaseException]],
+    ) -> tuple[Optional[Parameters], dict[str, Scalar]]:
         aggregated_parameters, aggregated_metrics = super().aggregate_fit(
             server_round, results, failures
         )
