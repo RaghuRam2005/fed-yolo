@@ -24,7 +24,7 @@ def main(grid:Grid, context:Context) -> None:
     """
 
     # Read run config
-    fraction_fit: float = context.run_config["fraction-train"]
+    fraction_train: float = context.run_config["fraction-train"]
     num_rounds: int = context.run_config["num-server-rounds"]
     lr: float = context.run_config["lr"]
 
@@ -39,14 +39,14 @@ def main(grid:Grid, context:Context) -> None:
     unwrapped_model = unwrap_model(global_model)
     state_dict = unwrapped_model.model.state_dict()
     tensor_state_dict = {
-        k: v.cpu().numpy()
+        k: v.detach()
         for k, v in state_dict.items()
         if isinstance(v, torch.Tensor)
     }
     arrays = ArrayRecord(tensor_state_dict, keep_input=True)
 
     # Initialize FedAvg strategy
-    strategy = CustomFedAvg(fraction_fit=fraction_fit, fraction_evaluate=1.0, min_fit_clients=2, min_evaluate_clients=2, min_available_clients=2)
+    strategy = CustomFedAvg(fraction_train=fraction_train, fraction_evaluate=1.0, min_train_nodes=2, min_evaluate_nodes=2, min_available_nodes=2)
 
     # Start strategy, run FedAvg for `num_rounds`
     result = strategy.start(

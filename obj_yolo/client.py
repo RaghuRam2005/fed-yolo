@@ -58,7 +58,7 @@ def train(msg:Message, context:Context):
     unwrapped_model = unwrap_model(model)
     state_dict = unwrapped_model.model.state_dict()
     detached_weights = {
-        k: v.cpu().numpy()
+        k: v.detach()
         for k, v in state_dict.items()
         if isinstance(v, torch.Tensor)
     }
