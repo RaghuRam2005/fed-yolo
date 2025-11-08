@@ -67,3 +67,10 @@ def prepare_kitti_data(num_clients:int=3, train_data_count:int=1000, test_data_c
             yaml.dump(content, f, sort_keys=True)
 
     print("All clients data preparation complete")
+
+if __name__ == "__main__":
+    prepare_kitti_data(
+        num_clients=5,
+        train_data_count=2000,
+        test_data_count=500,
+    )
