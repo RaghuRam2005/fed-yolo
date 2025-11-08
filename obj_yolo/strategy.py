@@ -76,10 +76,9 @@ class CustomFedAvg(FedAvg):
         BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
         self.model_path = Path(BASE_DIR_PATH) / "yolo_config" / "yolo11n.yaml"
     
-    def initialize_parameters(self, client_manager):
-        initial_parameters = self.initial_parameters
-        self.initial_parameters = None
-        return initial_parameters
+    def __repr__(self):
+        rep = f"FedAveraging merged with ultralytics, accept failures = {self.accept_failures}"
+        return rep
 
     def load_and_update_model(self, aggregated_parameters: Parameters) -> YOLO:
         net = YOLO(self.model_path)
@@ -92,7 +91,7 @@ class CustomFedAvg(FedAvg):
             if (k in backbone_weights) or (k in neck_weights) or (k in head_weights):
                 relevant_keys.append(k)
         
-        if len(aggregated_parameters) != len(relevant_keys):
+        if len(aggregated_ndarrays) != len(relevant_keys):
             strategy_name = self.__class__.__name__
             raise ValueError(
                 f"Mismatch in aggregated parameter count for strategy {strategy_name}: "

@@ -9,6 +9,7 @@ from flwr.clientapp import ClientApp
 from obj_yolo.utils import train as train_fn
 from obj_yolo.utils import test as test_fn
 from obj_yolo.utils import eval_train as train_val_fn
+from obj_yolo.strategy import get_section_parameters
 
 from ultralytics import YOLO
 from ultralytics.utils.torch_utils import unwrap_model
@@ -32,7 +33,7 @@ def train(msg:Message, context:Context):
 
     # load new model instance everytime we run a client train
     model = YOLO(YOLO_CONFIG)
-    new_arrays = msg.contet['arrays'].to_torch_state_dict()
+    new_arrays = msg.content['arrays'].to_torch_state_dict()
     state_dict = model.model.state_dict().copy()
     state_dict.update(new_arrays)
     model.model.load_state_dict(state_dict, strict=True)
@@ -61,9 +62,16 @@ def train(msg:Message, context:Context):
         for k, v in state_dict.items()
         if isinstance(v, torch.Tensor)
     }
+    backbone_weights, neck_weights, head_weights = get_section_parameters(state_dict=detached_weights)
+    all_keys = detached_weights.keys()
+    relevant_state_dict = {}
+
+    for k in all_keys:
+        if (k in backbone_weights) or (k in neck_weights) or (k in head_weights):
+            relevant_state_dict[k] = detached_weights[k]
 
     # construct record and store them
-    model_record = ArrayRecord(detached_weights)
+    model_record = ArrayRecord(relevant_state_dict)
     metrics = {
         'train-map':train_metrics,
         'num-examples':data_count,
@@ -81,7 +89,7 @@ def evaluate(msg:Message, context:Context):
 
     # load new model instance everytime we run a client train
     model = YOLO(YOLO_CONFIG)
-    new_arrays = msg.contet['arrays'].to_torch_state_dict()
+    new_arrays = msg.content['arrays'].to_torch_state_dict()
     state_dict = model.model.state_dict().copy()
     state_dict.update(new_arrays)
     model.model.load_state_dict(state_dict, strict=True)
