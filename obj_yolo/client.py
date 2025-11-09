@@ -40,10 +40,10 @@ def train(msg:Message, context:Context):
 
     # load configuration
     partition_id = context.node_config["partition-id"]
-    data_count = context.run_config["train-data-count"]
     data_path = Path(BASE_DIR_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "data.yaml"
     if not data_path.exists():
         raise Exception(f"Data Not prepared Exception: Client-{partition_id}")
+    data_count = len(os.listdir(Path(BASE_DIR_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "images" / "train"))
 
     # train the model
     train_metrics = train_fn(
@@ -96,10 +96,10 @@ def evaluate(msg:Message, context:Context):
 
     # load the data
     partition_id = context.node_config["partition-id"]
-    data_count = context.run_config["val-data-count"]
     data_path = Path(BASE_DIR_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "data.yaml"
     if not data_path.exists():
         raise Exception(f"Data Not prepared Exception: Client-{partition_id}")
+    data_count = len(os.listdir(Path(BASE_DIR_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "images" / "train"))
     
     # we are training model for warming up after loading the aggregation state
     #eval_train = train_val_fn(
