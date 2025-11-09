@@ -1,5 +1,6 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["setuptools>=65", "wheel", "hatchling"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "fed-yolo"
@@ -112,7 +113,7 @@ local-epochs = 3
 lr = 0.01
 
 [tool.setuptools]
-packages = ["obj_yolo", "ultralytics"]
+packages = ["obj_yolo"]
 
 [tool.flwr.federations]
 default = "local-simulation"
