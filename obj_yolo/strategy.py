@@ -132,13 +132,43 @@ class CustomFedAvg(FedAvg):
             
         return aggregated_parameters, aggregated_metrics
 
-class CustomFedAdam(FedAdam, CustomFedAvg):
+class CustomFedAdam(FedAdam):
     """
     FedAdam Class that works with YOLO architecture
     
     Some parts of this class is obtained from "UltraFlwr"
     refer to: https://github.com/KCL-BMEIS/UltraFlwr/blob/main
     """
+    def __repr__(self):
+        rep = f"FedAdam merged with ultralytics, accept failures = {self.accept_failures}"
+        return rep
+
+    def load_and_update_model(self, aggregated_parameters) -> YOLO:
+        net = YOLO(self.model_path)
+        current_state_dict = net.model.state_dict()
+        backbone_weights, neck_weights, head_weights = get_section_parameters(state_dict=current_state_dict)
+        parameters = aggregated_parameters.values()
+        aggregated_ndarrays = parameters_to_ndarrays(parameters=parameters)
+
+        relevant_keys = []
+        for k in sorted(current_state_dict.keys()):
+            if (k in backbone_weights) or (k in neck_weights) or (k in head_weights):
+                relevant_keys.append(k)
+        
+        if len(aggregated_ndarrays) != len(relevant_keys):
+            strategy_name = self.__class__.__name__
+            raise ValueError(
+                f"Mismatch in aggregated parameter count for strategy {strategy_name}: "
+                f"received {len(aggregated_ndarrays)}, expected {len(relevant_keys)}"
+            )
+        
+        params_dict = zip(relevant_keys, aggregated_ndarrays)
+        updated_weights = {k : torch.Tensor(v) for k, v in params_dict}
+        final_state_dict = current_state_dict.copy()
+        final_state_dict.update(updated_weights)
+        net.model.load_state_dict(final_state_dict, strict=True)
+        return net
+    
     def aggregate_fit(
         self,
         server_round: int,
