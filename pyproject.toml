@@ -1,7 +1,6 @@
 [build-system]
-requires = ["setuptools>=65", "wheel"]
+requires = ["setuptools>=65", "wheel", "hatchling"]
 build-backend = "setuptools.build_meta"
-
 
 [project]
 name = "fed-yolo"

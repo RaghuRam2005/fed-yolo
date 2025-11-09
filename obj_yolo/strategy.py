@@ -1,158 +1,157 @@
-# strategy.py
-import random
-from typing import List, Dict, Optional
-from abc import ABC, abstractmethod
+""" strategy for federated learning """
+import os
+import time
+from logging import INFO
+from pathlib import Path
+from typing import OrderedDict, Tuple, Union, Optional
+
+from flwr.common import Parameters, parameters_to_ndarrays, FitRes, Scalar
+from flwr.server.client_proxy import ClientProxy
+from flwr.serverapp.strategy import FedAvg, FedAdam
 
 import torch
 
-from ultralytics.engine.results import Results
+from ultralytics import YOLO
 
-from .client import FedWegClient, FedTagClient
-from .dataset import KittiData, BddData
-from .utils import (
-    FitConfig,
-    FitResFedWeg,
-    from_coo,
-)
+def get_section_parameters(state_dict:OrderedDict) -> Tuple[dict, dict, dict]:
+    """
+    Get parameters of each section of the model
 
-class Strategy(ABC):
-    @abstractmethod
-    def configure_fit(self):
-        pass
+    refer to: https://github.com/KCL-BMEIS/UltraFlwr/blob/main
+    This section is adopted from UltraFlwr
 
-    @abstractmethod
-    def aggregate_fit(self):
-        pass
+    Args:
+        state_dict (OrderedDict)
 
-    @abstractmethod
-    def aggregate_evaluate(self):
-        pass
+    Returns:
+        Tuple[dict, dict, dict]
+    """
+    # Backbone parameters (early layers through conv layers)
+    # backbone corresponds to:
+    # (0): Conv
+    # (1): Conv
+    # (2): C3k2
+    # (3): Conv
+    # (4): C3k2
+    # (5): Conv
+    # (6): C3k2
+    # (7): Conv
+    # (8): C3k2
+    backbone_weights = {
+        k: v for k, v in state_dict.items()
+        if not k.startswith(tuple(f'model.{i}' for i in range(9, 24)))
+    }
 
-class FedWeg(Strategy):
-    def __init__(self, data_class:KittiData, initial_sparsity:float=0.2, min_clients:int=2, client_epochs:int=10) -> None:
-        self.min_clients_for_aggregation = min_clients
-        self.initial_sparsity=initial_sparsity
-        self.data_class = data_class
-        self.client_epochs = client_epochs
+    # Neck parameters
+    # The neck consists of the following layers (by index in the Sequential container):
+    # (9): SPPF
+    # (10): C2PSA
+    # (11): Upsample
+    # (12): Concat
+    # (13): C3k2
+    # (14): Upsample
+    # (15): Concat
+    # (16): C3k2
+    # (17): Conv
+    # (18): Concat
+    # (19): C3k2
+    # (20): Conv
+    # (21): Concat
+    # (22): C3k2
+    neck_weights = {
+        k: v for k, v in state_dict.items()
+        if k.startswith(tuple(f'model.{i}' for i in range(9, 23)))
+    }
 
-    def configure_fit(self, num_supernodes:int, model_path:str, train_data_count:int, val_data_count:int) -> List[FedWegClient]:
-        if self.min_clients_for_aggregation < num_supernodes:
-            raise Exception(f"Min Clients for aggregation ({self.min_clients_for_aggregation}), exceeds the given clients({num_supernodes})")
+    # Head parameters (detection head)
+    head_weights = {
+        k: v for k, v in state_dict.items()
+        if k.startswith('model.23')
+    }
+
+    return backbone_weights, neck_weights, head_weights
+
+class CustomFedAvg(FedAvg):
+    """
+    FedAvg class that works with YOLO architecture
+
+    Some parts of this class is obtained from "UltraFlwr"
+    refer to: https://github.com/KCL-BMEIS/UltraFlwr/blob/main
+    """
+    def __init__(self, *, fraction_train = 1, fraction_evaluate = 1, min_train_nodes = 2, min_evaluate_nodes = 2, min_available_nodes = 2):
+        super().__init__(fraction_train=fraction_train, fraction_evaluate=fraction_evaluate, min_train_nodes=min_train_nodes, min_evaluate_nodes=min_evaluate_nodes, min_available_nodes=min_available_nodes)
+        BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
+        BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
+        self.model_path = Path(BASE_DIR_PATH) / "yolo_config" / "yolo11n.yaml"
+    
+    def __repr__(self):
+        rep = f"FedAveraging merged with ultralytics, accept failures = {self.accept_failures}"
+        return rep
+
+    def load_and_update_model(self, aggregated_parameters) -> YOLO:
+        net = YOLO(self.model_path)
+        current_state_dict = net.model.state_dict()
+        backbone_weights, neck_weights, head_weights = get_section_parameters(state_dict=current_state_dict)
+        parameters = aggregated_parameters.values()
+        aggregated_ndarrays = parameters_to_ndarrays(parameters=parameters)
+
+        relevant_keys = []
+        for k in sorted(current_state_dict.keys()):
+            if (k in backbone_weights) or (k in neck_weights) or (k in head_weights):
+                relevant_keys.append(k)
         
-        clients = []
-        for x in range(num_supernodes):
-            fitconfig = FitConfig(epochs=self.client_epochs)
-            client = FedWegClient(model_path=model_path, client_id=x, sparsity=self.initial_sparsity, fitconfig=fitconfig)
-            client.prepare_data(
-                data_class=self.data_class,
-                train_data_count=train_data_count,
-                val_data_count=val_data_count
+        if len(aggregated_ndarrays) != len(relevant_keys):
+            strategy_name = self.__class__.__name__
+            raise ValueError(
+                f"Mismatch in aggregated parameter count for strategy {strategy_name}: "
+                f"received {len(aggregated_ndarrays)}, expected {len(relevant_keys)}"
             )
-            clients.append(client)
-        return clients
-    
+        
+        params_dict = zip(relevant_keys, aggregated_ndarrays)
+        updated_weights = {k : torch.Tensor(v) for k, v in params_dict}
+        final_state_dict = current_state_dict.copy()
+        final_state_dict.update(updated_weights)
+        net.model.load_state_dict(final_state_dict, strict=True)
+        return net
+
     def aggregate_fit(
-            self,
-            global_state: Dict[str, torch.Tensor], 
-            results: List[FitResFedWeg]
-        ) -> Dict[str, torch.Tensor]:
-        """
-        Aggregate the clients using Inverse sparsity method
-        """
-        assert len(results) == self.min_clients_for_aggregation, \
-                f"Expected at least {self.min_clients_for_aggregation} clients, got {len(results)}"
+        self,
+        server_round: int,
+        results: list[tuple[ClientProxy, FitRes]],
+        failures: list[Union[tuple[ClientProxy, FitRes], BaseException]],
+    ) -> tuple[Optional[Parameters], dict[str, Scalar]]:
+        """Aggregate model weights using weighted average and store checkpoint."""
+        aggregated_parameters, aggregated_metrics = super().aggregate_fit(
+            server_round, results, failures
+        )
 
-        # compute inverse sparse weights
-        sparsities = [res.sparsity for res in results]
-        inv_sparsities = [1.0 / max(s, 0.2) for s in sparsities]
-        inv_sparsity_sum = sum(inv_sparsities)
+        if aggregated_parameters is not None:
+            net = self.load_and_update_model(aggregated_parameters)            
+            full_parameters = {k:val.detach() for k, val in net.model.state_dict().items()}
+            return full_parameters, aggregated_metrics
+            
+        return aggregated_parameters, aggregated_metrics
 
-        # Initialize aggregated states
-        agg_state = {k: v.clone().detach() for k, v in global_state.items()}
-
-        # Check key consistency
-        #expected_keys = {k for k in agg_state.keys() if not k.endswith(('running_mean', 'running_var', 'num_batches_tracked'))}
-        #all_delta_keys = set().union(*(res.delta.keys() for res in results))
-        #assert expected_keys == all_delta_keys, \
-        #       f"Key mismatch at delta keys and agg keys, missing: {expected_keys - all_delta_keys}, extra: {all_delta_keys - expected_keys}"
-
-        # Aggregate client updates
-        for i, res in enumerate(results):
-            weight = inv_sparsities[i] / inv_sparsity_sum
-            for key, delta in res.delta.items():
-                if key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-                    continue
-                if isinstance(delta, torch.Tensor) and delta.is_sparse:
-                    dense_delta = from_coo(delta)
-                    agg_state[key] += weight * dense_delta
-                elif isinstance(delta, torch.Tensor):
-                    agg_state[key] += weight * delta
-                else:
-                    raise TypeError(f"Delta for key {key} is not a torch.Tensor")
-
-        #assert list(agg_state.keys()) == list(expected_keys), \
-        #       f"Key mistch of agg state after aggregation, missing {expected_keys - agg_state.keys()}, extra: {agg_state.keys() - expected_keys}"
-
-        return agg_state
+class CustomFedAdam(FedAdam, CustomFedAvg):
+    """
+    FedAdam Class that works with YOLO architecture
     
-    def aggregate_evaluate(self, agg_state:Dict[str, torch.Tensor], clients:Optional[List[FedWegClient]], data_path:str) -> List[Results]:
-        agg_results = []
-        for client in clients:
-            client.update_model(parameters=agg_state)
-            result = client.evaluate(data_path=data_path)
-            agg_results.append(result)
-        return agg_results
-    
-    def update_sparsity(self, rounds_participated:int) -> float:
-        min_sparsity = 0.2
-        max_sparsity = 0.8
+    Some parts of this class is obtained from "UltraFlwr"
+    refer to: https://github.com/KCL-BMEIS/UltraFlwr/blob/main
+    """
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: list[tuple[ClientProxy, FitRes]],
+        failures: list[Union[tuple[ClientProxy, FitRes], BaseException]],
+    ) -> tuple[Optional[Parameters], dict[str, Scalar]]:
+        aggregated_parameters, aggregated_metrics = super().aggregate_fit(
+            server_round, results, failures
+        )
 
-        new_sparsity = min_sparsity + (rounds_participated * 0.1)
-        sparsity_tensor = torch.clip(torch.tensor(new_sparsity), min=min_sparsity, max=max_sparsity)
-        return sparsity_tensor.item()
-
-class FedTag(FedWeg):
-    def __init__(self, data_class:BddData, initial_sparsity:float, min_clients:int=2, client_epochs:int=10):
-        super().__init__(data_class=data_class,initial_sparsity=initial_sparsity, min_clients=min_clients, client_epochs=client_epochs)
-        self.client_tag_info:Dict = None
-
-    def configure_fit(self, num_supernodes:int, model_path:str, tag_dict:Dict, train_data_count:int, val_data_count:int) -> List[FedTagClient]:
-        clients = []
-        client_tag_info = {}
-        for client_id in range(num_supernodes):
-            tag = random.choice(list(tag_dict.keys()))
-            print(f'client_{client_id}: {tag}')
-            fitconfig = FitConfig(epochs=self.client_epochs)
-            client = FedTagClient(model_path=model_path, client_id=client_id, \
-                    sparsity=self.initial_sparsity, tag=tag, fitconfig=fitconfig)
-            print(client.tag)
-            image_list = tag_dict[client.tag]
-            random.shuffle(image_list)
-            train_img_list = image_list[:train_data_count]
-            val_img_list = image_list[train_data_count:train_data_count+val_data_count]
-            print("Train img list: ", len(train_img_list))
-            print("Val img list: ", len(val_img_list))
-            client.prepare_data(
-                data_class=self.data_class,
-                train_img_list=train_img_list,
-                val_img_list=val_img_list,
-            )
-            tag_info = client_tag_info.get(client.tag, [])
-            tag_info.append(client.client_id)
-            client_tag_info[client.tag] = tag_info
-            clients.append(client)
-        print("client_tag_info: ", client_tag_info)
-        self.client_tag_info = client_tag_info
-        return clients
-    
-    def update_sparsity(self, current_sparsity:float, change:float) -> float:
-        min_sparsity = 0.2
-        max_sparsity = 0.8
-
-        new_sparsity = current_sparsity + change
-        sparsity_tensor = torch.clip(torch.tensor(new_sparsity), min=min_sparsity, max=max_sparsity)
-        return sparsity_tensor.item()
-
-    def get_tag_dict(self):
-        return self.client_tag_info
-    
+        if aggregated_parameters is not None:
+            net = self.load_and_update_model(aggregated_parameters)            
+            full_parameters = {k:val.detach() for k, val in net.model.state_dict().items()}
+            return full_parameters, aggregated_metrics
+            
+        return aggregated_parameters, aggregated_metrics

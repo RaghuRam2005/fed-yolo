@@ -1,209 +1,327 @@
 # dataset.py
-"""data preparation file"""
+"""
+Data preparation for federated learning clients (KITTI)
+"""
+
 import os
-import shutil
-import json
 import yaml
+import math
+import shutil
 import random
+import numpy as np
 from pathlib import Path
-from typing import List, Dict, Tuple
-from multiprocessing import Pool, cpu_count
+from collections import defaultdict
+from typing import List, Dict, Set, Tuple
 
-KITTI_NC=8
-KITTI_CLASSES=["Car", "Pedestrian", "Van", "Cyclist", "Truck", "Misc", "Tram", "Person_sitting"]
+# KITTI dataset constants
+KITTI_NC = 8
+KITTI_CLASSES = [
+    "Car", "Pedestrian", "Van", "Cyclist",
+    "Truck", "Misc", "Tram", "Person_sitting"
+]
 
-BDD_NC=10
-BDD_CLASSES=["bus", "light", "sign", "person", "bike", "truck", "motor", "car", "train", "rider"]
-BDD_ID={name:i for i, name in enumerate(BDD_CLASSES)}
 
-class KittiData:
-    def __init__(
-            self,
-            base_data_path:str,
-            prep_data_path:str,
-            exist_ok:bool=False
-        ) -> None:
-        self.base_data_path = base_data_path
-        self.prep_data_path = prep_data_path
-        self.exist_ok = exist_ok
-        if not Path(base_data_path).exists():
-            raise Exception(f"Base Data not found at {self.base_data_path}")
-        if Path(prep_data_path).exists() and not self.exist_ok:
-            [shutil.rmtree(p) if p.is_dir() else p.unlink() for p in Path(prep_data_path).iterdir()]
-        if not Path(prep_data_path).exists():
-            Path(prep_data_path).mkdir(parents=True)
+def _read_image_class(label_path: Path) -> set[int]:
+    """Extract class ids from a label file."""
+    if not label_path.exists():
+        return set()
+    cls_ids = set()
+    with open(label_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            try:
+                cls_id = int(parts[0])
+                cls_ids.add(cls_id)
+            except Exception:
+                continue
+    return cls_ids
 
-    def prepare_global_data(self, data_count:int) -> str:
-        pass
-    
-    def prepare_client_data(self, client_id:int, train_data_count:int, val_data_count:int) -> str:
-        base_img_path = Path(self.base_data_path) / "image_2"
-        base_label_path = Path(self.base_data_path) / "labels"
 
-        if not base_img_path.exists() or not base_label_path.exists():
-            raise Exception(f"Base Data not found at {self.base_data_path}")
-        
-        client_data_path = Path(self.prep_data_path) / f"client_{client_id}"
-        client_img_path = client_data_path / "images"
-        client_label_path = client_data_path / "labels"
-        client_yaml_path = client_data_path / "data.yaml"
+def _split_train_and_val(
+    items: List[str], train_count: int, val_count: int, rng: random.Random
+) -> Tuple[List[str], List[str]]:
+    """Shuffle and split a list of items."""
+    items = list(items)
+    rng.shuffle(items)
+    return items[:train_count], items[train_count : train_count + val_count]
 
-        if client_yaml_path.exists():
-            return client_yaml_path
-        
-        (client_img_path / "train").mkdir(parents=True, exist_ok=self.exist_ok)
-        (client_label_path / "train").mkdir(parents=True, exist_ok=self.exist_ok)
-        (client_img_path / "val").mkdir(parents=True, exist_ok=self.exist_ok)
-        (client_label_path / "val").mkdir(parents=True, exist_ok=self.exist_ok)
 
-        image_list = os.listdir(base_img_path)
-        random.shuffle(image_list)
-        train_file_list = image_list[:train_data_count]
-        val_file_list = image_list[train_data_count:train_data_count+val_data_count]
+def _partition_dirichlet(
+    image_files: List[str],
+    class_to_imgs: Dict[int, List[str]],
+    num_clients: int,
+    dirichlet_alpha: float,
+) -> Dict[int, List[str]]:
+    """
+    Partition data using a Dirichlet distribution based on class labels.
+    Images with no labels will be distributed to clients with the fewest images.
+    """
+    client_to_all_imgs = {i: [] for i in range(num_clients)}
+    unassigned = set(image_files)
 
-        for file in train_file_list:
-            shutil.copy(base_img_path / file, client_img_path / "train" / file)
-            label = file.replace(".png", ".txt")
-            shutil.copy(base_label_path / label, client_label_path / "train" / label)
+    for c, imgs in class_to_imgs.items():
+        n = len(imgs)
+        if n == 0:
+            continue
 
-        for file in val_file_list:
-            shutil.copy(base_img_path / file, client_img_path / "val" / file)
-            label = file.replace(".png", ".txt")
-            shutil.copy(base_label_path / label, client_label_path / "val" / label)
+        # Get client proportions for this class
+        proportions = np.random.dirichlet([dirichlet_alpha] * num_clients)
+        quotas = [int(round(p * n)) for p in proportions]
 
-        content = {
-                "train" : str(client_img_path / "train" ),
-                "val" : str(client_img_path / "val" ),
-                "nc" : KITTI_NC,
-                "classes" : KITTI_CLASSES
-        }
-        
-        with open(client_yaml_path, "w") as f:
-            yaml.dump(content, f, sort_keys=True)
+        # Normalize rounding errors
+        while sum(quotas) > n:
+            quotas[np.argmax(quotas)] -= 1
+        while sum(quotas) < n:
+            quotas[np.argmin(quotas)] += 1
 
-        return str(client_yaml_path)
+        # Assign images to clients
+        idx = 0
+        for client, q in enumerate(quotas):
+            for _ in range(q):
+                if idx < n and imgs[idx] in unassigned:
+                    client_to_all_imgs[client].append(imgs[idx])
+                    unassigned.remove(imgs[idx])
+                idx += 1
 
-class BddData:
-    def __init__(
-            self,
-            base_data_path:str,
-            prep_data_path:str,
-            exist_ok:bool=False
-        ) -> None:
-        self.base_data_path = base_data_path
-        self.prep_data_path = prep_data_path
-        self.exist_ok = exist_ok
-        if not Path(base_data_path).exists():
-            raise Exception(f"Base Data not found at {self.base_data_path}")
-        if Path(prep_data_path).exists() and not self.exist_ok:
-            [shutil.rmtree(p) if p.is_dir() else p.unlink() for p in Path(prep_data_path).iterdir()]
-        if not Path(prep_data_path).exists():
-            Path(prep_data_path).mkdir(parents=True)
-    
-    def bbox_to_yolo(self, bbox, img_w, img_h, category):
-        cls_id = BDD_ID.get(category)
-        if cls_id is None:
-            return None
-        x1, y1, w, h = bbox
-        return (
-                cls_id,
-                (x1 + w/2) / img_w,
-                (y1 + h/2) / img_h,
-                w / img_w,
-                h / img_h
+    # Distribute leftover images (those with no labels)
+    for img in unassigned:
+        smallest_client = min(
+            client_to_all_imgs, key=lambda x: len(client_to_all_imgs[x])
+        )
+        client_to_all_imgs[smallest_client].append(img)
+
+    return client_to_all_imgs
+
+
+def _partition_shards(
+    image_list: List[str],
+    img_to_classes: Dict[str, Set[int]],
+    num_clients: int,
+    num_shards_per_client: int,
+    rng: random.Random,
+) -> Dict[int, List[str]]:
+    """
+    Partition data by sorting by class and distributing shards.
+    This creates a non-IID class distribution.
+    """
+    def get_primary_class(img):
+        classes = img_to_classes.get(img)
+        if not classes:
+            return float('inf')
+        return min(classes)
+
+    sorted_images = sorted(image_list, key=get_primary_class)
+
+    # Create shards
+    total_shards = num_clients * num_shards_per_client
+    shard_size = math.ceil(len(sorted_images) / total_shards)
+    shards = [
+        sorted_images[i * shard_size : (i + 1) * shard_size]
+        for i in range(total_shards)
+    ]
+
+    # Shuffle and assign shards to clients
+    rng.shuffle(shards)
+    client_to_all_imgs = {i: [] for i in range(num_clients)}
+
+    for client_id in range(num_clients):
+        client_shards = shards[
+            client_id * num_shards_per_client : (client_id + 1) * num_shards_per_client
+        ]
+        for shard in client_shards:
+            client_to_all_imgs[client_id].extend(shard)
+
+    return client_to_all_imgs
+
+
+def _partition_quantity_imbalance(
+    image_list: List[str],
+    num_clients: int,
+    imbalance_beta: float,
+    rng: random.Random,
+) -> Dict[int, List[str]]:
+    """
+    Partition data by shuffling (IID) but assigning imbalanced quantities
+    to each client based on a Dirichlet distribution.
+    """
+    # Shuffle data for IID distribution
+    rng.shuffle(image_list)
+
+    # Get imbalanced proportions
+    proportions = np.random.dirichlet([imbalance_beta] * num_clients)
+    counts = [int(round(p * len(image_list))) for p in proportions]
+
+    # Normalize rounding errors
+    while sum(counts) > len(image_list):
+        counts[np.argmax(counts)] -= 1
+    while sum(counts) < len(image_list):
+        counts[np.argmin(counts)] += 1
+
+    # Assign IID data in imbalanced quantities
+    client_to_all_imgs = {i: [] for i in range(num_clients)}
+    ptr = 0
+    for i in range(num_clients):
+        client_to_all_imgs[i] = image_list[ptr : ptr + counts[i]]
+        ptr += counts[i]
+
+    return client_to_all_imgs
+
+
+def prepare_kitti_data(
+    base_data_path: Path,
+    output_path: Path,
+    num_clients: int = 5,
+    train_ratio: float = 0.8,
+    partition_strategy: str = "dirichlet",
+    dirichlet_alpha: float = 0.3,
+    num_shards_per_client: int = 2,
+    imbalance_beta: float = 0.5,
+    seed: int = 42,
+):
+    """
+    Main function to prepare and partition KITTI data for clients.
+    """
+    rng = random.Random(seed)
+    np.random.seed(seed)
+
+    # Base paths
+    prepared_data_path = output_path
+    prepared_data_path.mkdir(parents=True, exist_ok=True)
+
+    base_img_path = base_data_path / "training" / "image_2"
+    base_label_path = base_data_path / "labels"
+
+    if not base_img_path.exists() or not base_label_path.exists():
+        raise FileNotFoundError(
+            f"KITTI dataset folders not found at {base_data_path}"
         )
 
-    def process_labels(self, item):
-        img_name = item["name"]
-        img_w, img_h = 1280, 720
+    # Collect images
+    image_files = sorted(
+        [f for f in os.listdir(base_img_path) if f.endswith((".png", ".jpg"))]
+    )
 
-        yolo_boxes = [
-                self.bbox_to_yolo(
-                    [
-                        obj["box2d"]["x1"],
-                        obj["box2d"]["y1"],
-                        obj["box2d"]["x2"] - obj["box2d"]["x1"],
-                        obj["box2d"]["y2"] - obj["box2d"]["y1"],
-                    ],
-                    img_w,
-                    img_h,
-                    obj["category"]
-                )
-                for obj in item.get("labels", [])
-                if "box2d" in obj and obj["category"] in BDD_ID
-        ]
+    # Build class mapping
+    img_to_classes = {}
+    class_to_imgs = defaultdict(list)
+    for img in image_files:
+        lbl_file = base_label_path / (img.rsplit(".", 1)[0] + ".txt")
+        cls_set = _read_image_class(lbl_file)
+        img_to_classes[img] = cls_set
+        for c in cls_set:
+            class_to_imgs[c].append(img)
 
-        yolo_boxes = [box for box in yolo_boxes if box]
+    # Partition Methods
+    if partition_strategy == "dirichlet":
+        client_to_all_imgs = _partition_dirichlet(
+            image_files, class_to_imgs, num_clients, dirichlet_alpha
+        )
+    elif partition_strategy == "shards":
+        client_to_all_imgs = _partition_shards(
+            image_files, img_to_classes, num_clients, num_shards_per_client, rng
+        )
+    elif partition_strategy == "quantity-imbalance":
+        client_to_all_imgs = _partition_quantity_imbalance(
+            image_files, num_clients, imbalance_beta, rng
+        )
+    else:
+        raise ValueError(f"Unknown partition strategy: {partition_strategy}")
 
-        weather = item["attributes"].get("weather", "unknown")
-        scene = item["attributes"].get("scene", "unknown")
+    # Write client folders
+    for client, img_list in client_to_all_imgs.items():
+        img_list = list(dict.fromkeys(img_list))
+        client_dir = prepared_data_path / f"client_{client}"
+        img_train = client_dir / "images/train"
+        img_val = client_dir / "images/val"
+        lbl_train = client_dir / "labels/train"
+        lbl_val = client_dir / "labels/val"
+        for p in [img_train, img_val, lbl_train, lbl_val]:
+            p.mkdir(parents=True, exist_ok=True)
 
-        return weather, scene, (img_name, yolo_boxes)
-
-
-    def create_tag_dicts(self) -> Tuple[Dict]:
-        label_file_path = Path(self.base_data_path) / "labels" / "label_train.json"
-        if not label_file_path.exists():
-            raise Exception(f"Label file not found at {label_file_path}")
-
-        with open(label_file_path, "r") as f:
-            label_data = json.load(f)
-
-        weather_dict, scene_dict = {}, {}
-
-        with Pool(processes=cpu_count()) as pool:
-            results = pool.map(self.process_labels, label_data)
-
-        for weather, scene, entry in results:
-            weather_dict.setdefault(weather, []).append(entry)
-            scene_dict.setdefault(scene, []).append(entry)
-
-        return weather_dict, scene_dict
-    
-    def prepare_client_data(self, client_id:int, train_img_list:List[str], val_img_list:List[str]) -> str:
-        base_img_path = Path(self.base_data_path) / "100k" / "train"
-        if not Path(base_img_path).exists():
-            raise Exception(f"base images not found at {base_img_path}")
-
-        client_data_path = Path(self.prep_data_path) / f"client_{client_id}"
-
-        client_img_path = client_data_path / "images"
-        client_label_path = client_data_path / "labels"
-
-        (client_img_path / "train").mkdir(parents=True, exist_ok=self.exist_ok)
-        (client_img_path / "val").mkdir(parents=True, exist_ok=self.exist_ok)
-        (client_label_path / "train").mkdir(parents=True, exist_ok=self.exist_ok)
-        (client_label_path / "val").mkdir(parents=True, exist_ok=self.exist_ok)
-
-        def write_data(image_list:List[str], img_dir:Path, label_dir:Path):
-            for img_name, boxes in image_list:
-                src_img = base_img_path / img_name
-                dst_img = img_dir / img_name
-                if src_img.exists():
-                    shutil.copy(src_img, dst_img)
-                
-                label_name = str(img_name).replace(".jpg", ".txt")
-                label_path = label_dir / label_name
-
-                with open(label_path, "w") as f:
-                    for box in boxes:
-                        f.write(" ".join(map(str, box)) + "\n")
+        total_images = len(img_list)
+        if total_images < 2:
+            # Need at least 2 images for a train/val split
+            t_count = total_images
+            v_count = 0
+        else:
+            t_count = int(total_images * train_ratio)
+            v_count = total_images - t_count
+            
+            # Ensure val set is not empty (if we have >1 image)
+            if v_count == 0:
+                t_count -= 1
+                v_count = 1
         
-        write_data(train_img_list, client_img_path / "train", client_label_path / "train")
-        write_data(val_img_list, client_img_path / "val", client_label_path / "val")
+        train_files, val_files = _split_train_and_val(
+            img_list, t_count, v_count, rng
+        )
 
-        # create dataset yaml
-        
-        client_yaml_path = client_data_path / "data.yaml"
+        # Copy files to client directories
+        for f in train_files:
+            shutil.copy(base_img_path / f, img_train / f)
+            shutil.copy(
+                base_label_path / (f.rsplit(".", 1)[0] + ".txt"),
+                lbl_train / (f.rsplit(".", 1)[0] + ".txt"),
+            )
 
-        content = {
-                "train":str(client_img_path / "train"),
-                "val" : str(client_img_path / "val"),
-                "nc" : BDD_NC,
-                "names": BDD_CLASSES,
-        }
+        for f in val_files:
+            shutil.copy(base_img_path / f, img_val / f)
+            shutil.copy(
+                base_label_path / (f.rsplit(".", 1)[0] + ".txt"),
+                lbl_val / (f.rsplit(".", 1)[0] + ".txt"),
+            )
 
-        with open(client_yaml_path, "w") as f:
-            yaml.dump(content, f, sort_keys=False)
+        # Write config YAML
+        yaml.dump(
+            {
+                "train": str(img_train),
+                "val": str(img_val),
+                "nc": KITTI_NC,
+                "classes": KITTI_CLASSES,
+            },
+            open(client_dir / "data.yaml", "w"),
+        )
 
-        return client_yaml_path
+    print(
+        f"Prepared {num_clients} clients at {output_path} "
+        f"using strategy = {partition_strategy}"
+    )
+
+
+if __name__ == "__main__":
+    CURRENT_DIR = Path(__file__).parent
+    BASE_DATA_PATH = CURRENT_DIR.parent / "dataset"
+    OUTPUT_PATH = CURRENT_DIR.parent / "dataset" / "clients"
+
+    print("--- Preparing data with 'dirichlet' strategy ---")
+    prepare_kitti_data(
+        base_data_path=BASE_DATA_PATH,
+        output_path=OUTPUT_PATH / "dirichlet",
+        num_clients=5,
+        partition_strategy="dirichlet",
+        dirichlet_alpha=0.3,
+        seed=42,
+    )
+
+    #print("\n--- Preparing data with 'shards' strategy ---")
+    #prepare_kitti_data(
+    #    base_data_path=BASE_DATA_PATH,
+    #    output_path=OUTPUT_PATH / "shards",
+    #    num_clients=5,
+    #    partition_strategy="shards",
+    #    num_shards_per_client=2,
+    #    seed=42,
+    #)
+
+    #print("\n--- Preparing data with 'quantity-imbalance' strategy ---")
+    #prepare_kitti_data(
+    #    base_data_path=BASE_DATA_PATH,
+    #    output_path=OUTPUT_PATH / "quantity-imbalance",
+    #    num_clients=5,
+    #    partition_strategy="quantity-imbalance",
+    #    imbalance_beta=0.5,
+    #    seed=42,
+    #)
