@@ -1,13 +1,24 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
 [project]
-name = "obj-yolo"
-version = "2.0.0"
-description = "federated learning environment for yolo model"
+name = "fed-yolo"
+version = "1.0.1"
+description = "Federated Learning Environment Simulation usign flwr and ultralytics"
 readme = "README.md"
 requires-python = ">=3.12"
 
 authors = [
     {name = "RaghuRam2005", email="atommail20@gmail.com"}
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.flwr.app]
+publisher = "RaghuRam2005"
 
 # Required dependencies ------------------------------------------------------------------------------------------------
 dependencies = [
@@ -24,7 +35,7 @@ dependencies = [
     "psutil", # system utilization
     "polars",
     "ultralytics-thop>=2.0.0", # FLOPs computation https://github.com/ultralytics/thop
-    "flwr==1.19.0",
+    "flwr[simulation]==1.19.0",
     "PyYAML>=6.0.2",
     "pathlib >=1.0.1",
     "pynvml >=12.0.0",
@@ -81,6 +92,7 @@ typing = [
     "types-shapely",
 ]
 
+# For custom _do_train function from ultralytics
 [project.urls]
 "Homepage" = "https://ultralytics.com"
 "Source" = "https://github.com/ultralytics/ultralytics"
@@ -88,9 +100,26 @@ typing = [
 "Bug Reports" = "https://github.com/ultralytics/ultralytics/issues"
 "Changelog" = "https://github.com/ultralytics/ultralytics/releases"
 
-[project.scripts]
-yolo = "ultralytics.cfg:entrypoint"
-ultralytics = "ultralytics.cfg:entrypoint"
+[tool.flwr.app.components]
+serverapp = "obj_yolo.server:server_app"
+clientapp = "obj_yolo.client:client_app"
+
+# Custom config values accessible via `context.run_config`
+[tool.flwr.app.config]
+train-data-count=1000
+val-data-count=200
+num-server-rounds = 20
+fraction-train = 1.0
+local-epochs = 3
+lr = 0.01
 
 [tool.setuptools]
-packages = ["obj_yolo", "ultralytics"]
+packages = ["obj_yolo"]
+
+[tool.flwr.federations]
+default = "local-simulation"
+
+[tool.flwr.federations.local-simulation]
+options.num-supernodes = 5
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 0.5
