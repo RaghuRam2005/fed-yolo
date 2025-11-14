@@ -1,11 +1,15 @@
 # result folder
-/fed_yolo
-/fed_yolo_res_1
-/fed_yolo_runs
+/flwr_simulation
 /runs
 
 # data folder
-/data
+/dataset
+base_data/
+prepared_data/
+bdd100k*
+labels/
+training/
+testing/
 
 # downloaded models
 yolov8n.pt
@@ -13,9 +17,6 @@ yolo11n.pt
 
 # virtual environment files
 /.venv
-
-# env file
-/obj_yolo/.env
 
 # miscellaneous
 .vscode
@@ -25,13 +26,3 @@ obj_yolo.egg-info
 fed_yolo.egg-info
 __pycache__
 uv.lock
-ultralytics/
-
-# dataset folders
-base_data/
-prepared_data/
-bdd100k*
-dataset/
-labels/
-training/
-testing/

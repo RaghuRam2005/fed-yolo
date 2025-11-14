@@ -113,7 +113,7 @@ local-epochs = 2
 lr = 0.01
 
 [tool.setuptools]
-packages = ["obj_yolo"]
+packages = ["obj_yolo", "ultralytics"]
 
 [tool.flwr.federations]
 default = "local-simulation"
