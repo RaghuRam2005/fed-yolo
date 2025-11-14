@@ -22,6 +22,7 @@ yolo11n.pt
 previous versions
 /obj_yolo/__pycache__/
 obj_yolo.egg-info
+fed_yolo.egg-info
 __pycache__
 uv.lock
 ultralytics/

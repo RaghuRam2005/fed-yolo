@@ -9,8 +9,7 @@ from flwr.serverapp import Grid, ServerApp
 from ultralytics import YOLO
 from ultralytics.utils.torch_utils import unwrap_model
 
-from obj_yolo.strategy import CustomFedAvg
-#from obj_yolo.strategy import CustomFedAdam
+from obj_yolo.strategy.fedavg import CustomFedAvg
 
 server_app = ServerApp()
 
