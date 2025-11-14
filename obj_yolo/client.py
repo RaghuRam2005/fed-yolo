@@ -57,6 +57,7 @@ def train(msg:Message, context:Context):
         data_path=data_path,
         local_epochs=context.run_config['local-epochs'],
         lr0=msg.content["config"]["lr"],
+        mu=msg.content["config"]["mu"],
     )
 
     # construct the state dict of the model

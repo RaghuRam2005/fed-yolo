@@ -3,7 +3,7 @@ from pathlib import Path
 
 from ultralytics.engine.model import Model
 
-def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:float):
+def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:float, mu:float):
     train_results = model.train(
         data=data_path,
         epochs=local_epochs,
@@ -32,6 +32,7 @@ def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:f
         lr0=lr0,
         
         val=True,
+        mu=mu,
 
         # hyprparameters
 
