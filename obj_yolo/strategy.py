@@ -15,7 +15,8 @@ from flwr.common import (
     ArrayRecord,
     Message,
     MessageType,
-    MetricRecord
+    MetricRecord,
+    parameters_to_ndarrays,
 )
 from flwr.server import Grid
 from flwr.serverapp.strategy import FedAvg, Result
@@ -212,10 +213,10 @@ class CustomFedAvg(FedAvg):
         return self._construct_messages(record, node_ids, MessageType.TRAIN)
 
 
-    def load_and_update_model(self, aggregated_state) -> YOLO:
-        net = YOLO(self.model_path).load('yolov11n.pt')
+    def load_and_update_model(self, aggregated_state:ArrayRecord) -> YOLO:
+        net = YOLO(self.model_path).load('yolo11n.pt')
         state_dict = net.model.state_dict().copy()
-        state_dict.update(aggregated_state)
+        state_dict.update(aggregated_state.to_torch_state_dict())
         net.model.load_state_dict(state_dict)
         return net
 
@@ -223,7 +224,7 @@ class CustomFedAvg(FedAvg):
         self,
         server_round: int,
         replies: Iterable[Message]
-    ) -> tuple[Optional[Parameters], dict[str, Scalar]]:
+    ) -> tuple[Optional[ArrayRecord], Optional[MetricRecord]]:
         """Aggregate model weights using weighted average and store checkpoint."""
         valid_replies, _ = self._check_and_log_replies(replies, is_train=True)
 
@@ -231,13 +232,13 @@ class CustomFedAvg(FedAvg):
 
         for msg in valid_replies:
             train_array = msg.content[self.arrayrecord_key]
-            train_config = msg.content[self.configrecord_key]
-            nid = msg.node_id
+            metric_array = msg.content['metrics']
+            nid = msg.metadata.src_node_id
             client_untrain = msg.content[self.untrain_record_key]
             self.untrain_arrays[nid] = client_untrain
 
             record = RecordDict(
-                {self.arrayrecord_key: train_array, self.configrecord_key: train_config}
+                {self.arrayrecord_key: train_array, 'metrics':metric_array}
             )
 
             train_records.append(record)
@@ -258,7 +259,7 @@ class CustomFedAvg(FedAvg):
             net = self.load_and_update_model(aggregated_parameters)            
             full_parameters = {k:val.detach() for k, val in net.model.state_dict().items() \
                                if not k.endswith(('running_mean', 'running_var', 'num_batches_tracked'))}
-            return full_parameters, aggregated_metrics
+            return ArrayRecord(full_parameters), aggregated_metrics
             
         return aggregated_parameters, aggregated_metrics
 
@@ -326,7 +327,7 @@ class CustomFedAvg(FedAvg):
                 result.evaluate_metrics_serverapp[0] = res
             
         arrays = initial_arrays
-        self.untrain_arrays[0] = untrainable_parameters.to_numpy_ndarrays()
+        self.untrain_arrays[0] = untrainable_parameters
 
         for current_round in range(1, num_rounds+1):
             log(INFO, "")
