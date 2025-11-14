@@ -1,14 +1,9 @@
 # dataset.py
-"""
-Data preparation for federated learning clients (KITTI)
-"""
-
+""" data preparation for clients """
 import os
 import yaml
-import math
 import shutil
 import random
-import numpy as np
 from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Set, Tuple
