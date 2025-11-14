@@ -11,6 +11,7 @@ from ultralytics.utils.torch_utils import unwrap_model
 
 from obj_yolo.strategy.fedavg import CustomFedAvg
 from obj_yolo.strategy.fedadam import CustomFedAdam
+from obj_yolo.strategy.fedprox import CustomFedProx
 
 server_app = ServerApp()
 
@@ -51,13 +52,13 @@ def main(grid:Grid, context:Context) -> None:
     untrain_arrays = ArrayRecord(untrainable_parameters)
 
     # Initialize FedAvg strategy
-    strategy = CustomFedAvg(
-        fraction_train=fraction_train, 
-        fraction_evaluate=1.0, 
-        min_train_nodes=2,
-        min_evaluate_nodes=2, 
-        min_available_nodes=2
-    )
+    #strategy = CustomFedAvg(
+    #    fraction_train=fraction_train, 
+    #    fraction_evaluate=1.0, 
+    #    min_train_nodes=2,
+    #    min_evaluate_nodes=2, 
+    #    min_available_nodes=2
+    #)
     #strategy = CustomFedAdam(
     #    fraction_train=fraction_train,
     #    fraction_evaluate=1.0,
@@ -70,6 +71,14 @@ def main(grid:Grid, context:Context) -> None:
     #    beta_2=0.9,
     #    tau=0.001,
     #)
+    strategy = CustomFedProx(
+        fraction_train=1.0,
+        fraction_evaluate=1.0,
+        min_train_nodes=2,
+        min_evaluate_nodes=2,
+        min_available_nodes=2,
+        proximal_mu=0.3,
+    )
 
     # Start strategy, run FedAvg for `num_rounds`
     result = strategy.start(
