@@ -1,187 +1,393 @@
 """ strategy for federated learning """
+import io
 import os
 import time
 from logging import INFO
 from pathlib import Path
-from typing import OrderedDict, Tuple, Union, Optional
+from typing import Optional, Callable, Iterable
 
-from flwr.common import Parameters, parameters_to_ndarrays, FitRes, Scalar
-from flwr.server.client_proxy import ClientProxy
-from flwr.serverapp.strategy import FedAvg, FedAdam
-
-import torch
+from flwr.common import (
+    Parameters, 
+    Scalar, 
+    log,
+    RecordDict,
+    ConfigRecord,
+    ArrayRecord,
+    Message,
+    MessageType,
+    MetricRecord
+)
+from flwr.server import Grid
+from flwr.serverapp.strategy import FedAvg, Result
+from flwr.serverapp.strategy.strategy_utils import (
+    log_strategy_start_info, 
+    sample_nodes,
+    aggregate_arrayrecords,
+)
+from flwr.serverapp.exception import InconsistentMessageReplies
 
 from ultralytics import YOLO
 
-def get_section_parameters(state_dict:OrderedDict) -> Tuple[dict, dict, dict]:
+def validate_message_reply_consistency(
+    replies: list[RecordDict], weighted_by_key:str, check_arrayrecord:bool
+) -> None:
+    """Validate that replies contain exactly one ArrayRecord and one MetricRecord, and
+    that the MetricRecord includes a weight factor key.
+
+    These checks ensure that Message-based strategies behave consistently with
+    *Ins/*Res-based strategies.
     """
-    Get parameters of each section of the model
+    # Checking for ArrayRecord consistency
+    if check_arrayrecord:
+        if any(len(msg.array_records) != 2 for msg in replies):
+            raise InconsistentMessageReplies(
+                reason="Expected exactly two ArrayRecord in replies. "
+                "Skipping aggregation."
+            )
 
-    refer to: https://github.com/KCL-BMEIS/UltraFlwr/blob/main
-    This section is adopted from UltraFlwr
+        # Ensure all key are present in all ArrayRecords
+        record_key = next(iter(replies[0].array_records.keys()))
+        all_keys = set(replies[0][record_key].keys())
+        if any(set(msg.get(record_key, {}).keys()) != all_keys for msg in replies[1:]):
+            raise InconsistentMessageReplies(
+                reason="All ArrayRecords must have the same keys for aggregation. "
+                "This condition wasn't met. Skipping aggregation."
+            )
 
-    Args:
-        state_dict (OrderedDict)
+    # Checking for MetricRecord consistency
+    if any(len(msg.metric_records) != 1 for msg in replies):
+        raise InconsistentMessageReplies(
+            reason="Expected exactly one MetricRecord in replies, but found more. "
+            "Skipping aggregation."
+        )
 
-    Returns:
-        Tuple[dict, dict, dict]
-    """
-    # Backbone parameters (early layers through conv layers)
-    # backbone corresponds to:
-    # (0): Conv
-    # (1): Conv
-    # (2): C3k2
-    # (3): Conv
-    # (4): C3k2
-    # (5): Conv
-    # (6): C3k2
-    # (7): Conv
-    # (8): C3k2
-    backbone_weights = {
-        k: v for k, v in state_dict.items()
-        if not k.startswith(tuple(f'model.{i}' for i in range(9, 24)))
-    }
+    # Ensure all key are present in all MetricRecords
+    record_key = next(iter(replies[0].metric_records.keys()))
+    all_keys = set(replies[0][record_key].keys())
+    if any(set(msg.get(record_key, {}).keys()) != all_keys for msg in replies[1:]):
+        raise InconsistentMessageReplies(
+            reason="All MetricRecords must have the same keys for aggregation. "
+            "This condition wasn't met. Skipping aggregation."
+        )
 
-    # Neck parameters
-    # The neck consists of the following layers (by index in the Sequential container):
-    # (9): SPPF
-    # (10): C2PSA
-    # (11): Upsample
-    # (12): Concat
-    # (13): C3k2
-    # (14): Upsample
-    # (15): Concat
-    # (16): C3k2
-    # (17): Conv
-    # (18): Concat
-    # (19): C3k2
-    # (20): Conv
-    # (21): Concat
-    # (22): C3k2
-    neck_weights = {
-        k: v for k, v in state_dict.items()
-        if k.startswith(tuple(f'model.{i}' for i in range(9, 23)))
-    }
+    # Verify the weight factor key presence in all MetricRecords
+    if weighted_by_key not in all_keys:
+        raise InconsistentMessageReplies(
+            reason=f"Missing required key `{weighted_by_key}` in the MetricRecord of "
+            "reply messages. Cannot average ArrayRecords and MetricRecords. Skipping "
+            "aggregation."
+        )
 
-    # Head parameters (detection head)
-    head_weights = {
-        k: v for k, v in state_dict.items()
-        if k.startswith('model.23')
-    }
-
-    return backbone_weights, neck_weights, head_weights
+    # Check that it is not a list
+    if any(isinstance(msg[record_key][weighted_by_key], list) for msg in replies):
+        raise InconsistentMessageReplies(
+            reason=f"Key `{weighted_by_key}` in the MetricRecord of reply messages "
+            "must be a single value (int or float), but a list was found. Skipping "
+            "aggregation."
+        )
 
 class CustomFedAvg(FedAvg):
     """
     FedAvg class that works with YOLO architecture
-
-    Some parts of this class is obtained from "UltraFlwr"
-    refer to: https://github.com/KCL-BMEIS/UltraFlwr/blob/main
     """
     def __init__(self, *, fraction_train = 1, fraction_evaluate = 1, min_train_nodes = 2, min_evaluate_nodes = 2, min_available_nodes = 2):
         super().__init__(fraction_train=fraction_train, fraction_evaluate=fraction_evaluate, min_train_nodes=min_train_nodes, min_evaluate_nodes=min_evaluate_nodes, min_available_nodes=min_available_nodes)
         BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
         BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
         self.model_path = Path(BASE_DIR_PATH) / "yolo_config" / "yolo11n.yaml"
+        self.untrain_record_key = "untrain_arrays"
+        self.untrain_arrays : dict[str, ArrayRecord] = {}
     
     def __repr__(self):
         rep = f"FedAveraging merged with ultralytics, accept failures = {self.accept_failures}"
         return rep
-
-    def load_and_update_model(self, aggregated_parameters) -> YOLO:
-        net = YOLO(self.model_path)
-        current_state_dict = net.model.state_dict()
-        backbone_weights, neck_weights, head_weights = get_section_parameters(state_dict=current_state_dict)
-        parameters = aggregated_parameters.values()
-        aggregated_ndarrays = parameters_to_ndarrays(parameters=parameters)
-
-        relevant_keys = []
-        for k in sorted(current_state_dict.keys()):
-            if (k in backbone_weights) or (k in neck_weights) or (k in head_weights):
-                relevant_keys.append(k)
-        
-        if len(aggregated_ndarrays) != len(relevant_keys):
-            strategy_name = self.__class__.__name__
-            raise ValueError(
-                f"Mismatch in aggregated parameter count for strategy {strategy_name}: "
-                f"received {len(aggregated_ndarrays)}, expected {len(relevant_keys)}"
+    
+    def _construct_messages(
+            self, 
+            record:RecordDict,
+            node_ids:list[int],
+            message_type:str
+    ) -> Iterable[Message]:
+        messages = []
+        for node_id in node_ids:
+            record[self.untrain_record_key] = self.untrain_arrays.get(
+                node_id,
+                self.untrain_arrays.get(0, None)
             )
-        
-        params_dict = zip(relevant_keys, aggregated_ndarrays)
-        updated_weights = {k : torch.Tensor(v) for k, v in params_dict}
-        final_state_dict = current_state_dict.copy()
-        final_state_dict.update(updated_weights)
-        net.model.load_state_dict(final_state_dict, strict=True)
+            message = Message(
+                content=record,
+                message_type=message_type,
+                dst_node_id=node_id,
+            )
+            messages.append(message)
+        return messages
+
+    def _check_and_log_replies(
+        self, replies: Iterable[Message], is_train: bool, validate: bool = True
+    ) -> tuple[list[Message], list[Message]]:
+        """Check replies for errors and log them.
+
+        Parameters
+        ----------
+        replies : Iterable[Message]
+            Iterable of reply Messages.
+        is_train : bool
+            Set to True if the replies are from a training round; False otherwise.
+            This impacts logging and validation behavior.
+        validate : bool (default: True)
+            Whether to validate the reply contents for consistency.
+
+        Returns
+        -------
+        tuple[list[Message], list[Message]]
+            A tuple containing two lists:
+            - Messages with valid contents.
+            - Messages with errors.
+        """
+        if not replies:
+            return [], []
+
+        # Filter messages that carry content
+        valid_replies: list[Message] = []
+        error_replies: list[Message] = []
+        for msg in replies:
+            if msg.has_error():
+                error_replies.append(msg)
+            else:
+                valid_replies.append(msg)
+
+        log(
+            INFO,
+            "%s: Received %s results and %s failures",
+            "aggregate_train" if is_train else "aggregate_evaluate",
+            len(valid_replies),
+            len(error_replies),
+        )
+
+        # Log errors
+        for msg in error_replies:
+            log(
+                INFO,
+                "\t> Received error in reply from node %d: %s",
+                msg.metadata.src_node_id,
+                msg.error.reason,
+            )
+
+        # Ensure expected ArrayRecords and MetricRecords are received
+        if validate and valid_replies:
+            validate_message_reply_consistency(
+                replies=[msg.content for msg in valid_replies],
+                weighted_by_key=self.weighted_by_key,
+                check_arrayrecord=is_train,
+            )
+
+        return valid_replies, error_replies
+    
+    def configure_train(
+            self,
+            server_round:int, 
+            arrays: ArrayRecord,
+            config: ConfigRecord,
+            grid:Grid,
+        ) -> Iterable[Message]:
+        if self.fraction_train == 0.0:
+            return []
+        # Sample nodes
+        num_nodes = int(len(list(grid.get_node_ids())) * self.fraction_train)
+        sample_size = max(num_nodes, self.min_train_nodes)
+        node_ids, num_total = sample_nodes(grid, self.min_available_nodes, sample_size)
+        log(
+            INFO,
+            "configure_train: Sampled %s nodes (out of %s)",
+            len(node_ids),
+            len(num_total),
+        )
+        # Always inject current server round
+        config["server-round"] = server_round
+
+        # Construct messages
+        record = RecordDict(
+            {self.arrayrecord_key: arrays, self.configrecord_key: config}
+        )
+        return self._construct_messages(record, node_ids, MessageType.TRAIN)
+
+
+    def load_and_update_model(self, aggregated_state) -> YOLO:
+        net = YOLO(self.model_path).load('yolov11n.pt')
+        state_dict = net.model.state_dict().copy()
+        state_dict.update(aggregated_state)
+        net.model.load_state_dict(state_dict)
         return net
 
-    def aggregate_fit(
+    def aggregate_train(
         self,
         server_round: int,
-        results: list[tuple[ClientProxy, FitRes]],
-        failures: list[Union[tuple[ClientProxy, FitRes], BaseException]],
+        replies: Iterable[Message]
     ) -> tuple[Optional[Parameters], dict[str, Scalar]]:
         """Aggregate model weights using weighted average and store checkpoint."""
-        aggregated_parameters, aggregated_metrics = super().aggregate_fit(
-            server_round, results, failures
-        )
+        valid_replies, _ = self._check_and_log_replies(replies, is_train=True)
 
-        if aggregated_parameters is not None:
-            net = self.load_and_update_model(aggregated_parameters)            
-            full_parameters = {k:val.detach() for k, val in net.model.state_dict().items()}
-            return full_parameters, aggregated_metrics
-            
-        return aggregated_parameters, aggregated_metrics
+        train_records = []
 
-class CustomFedAdam(FedAdam):
-    """
-    FedAdam Class that works with YOLO architecture
-    
-    Some parts of this class is obtained from "UltraFlwr"
-    refer to: https://github.com/KCL-BMEIS/UltraFlwr/blob/main
-    """
-    def __repr__(self):
-        rep = f"FedAdam merged with ultralytics, accept failures = {self.accept_failures}"
-        return rep
+        for msg in valid_replies:
+            train_array = msg.content[self.arrayrecord_key]
+            train_config = msg.content[self.configrecord_key]
+            nid = msg.node_id
+            client_untrain = msg.content[self.untrain_record_key]
+            self.untrain_arrays[nid] = client_untrain
 
-    def load_and_update_model(self, aggregated_parameters) -> YOLO:
-        net = YOLO(self.model_path)
-        current_state_dict = net.model.state_dict()
-        backbone_weights, neck_weights, head_weights = get_section_parameters(state_dict=current_state_dict)
-        parameters = aggregated_parameters.values()
-        aggregated_ndarrays = parameters_to_ndarrays(parameters=parameters)
-
-        relevant_keys = []
-        for k in sorted(current_state_dict.keys()):
-            if (k in backbone_weights) or (k in neck_weights) or (k in head_weights):
-                relevant_keys.append(k)
-        
-        if len(aggregated_ndarrays) != len(relevant_keys):
-            strategy_name = self.__class__.__name__
-            raise ValueError(
-                f"Mismatch in aggregated parameter count for strategy {strategy_name}: "
-                f"received {len(aggregated_ndarrays)}, expected {len(relevant_keys)}"
+            record = RecordDict(
+                {self.arrayrecord_key: train_array, self.configrecord_key: train_config}
             )
+
+            train_records.append(record)
         
-        params_dict = zip(relevant_keys, aggregated_ndarrays)
-        updated_weights = {k : torch.Tensor(v) for k, v in params_dict}
-        final_state_dict = current_state_dict.copy()
-        final_state_dict.update(updated_weights)
-        net.model.load_state_dict(final_state_dict, strict=True)
-        return net
-    
-    def aggregate_fit(
-        self,
-        server_round: int,
-        results: list[tuple[ClientProxy, FitRes]],
-        failures: list[Union[tuple[ClientProxy, FitRes], BaseException]],
-    ) -> tuple[Optional[Parameters], dict[str, Scalar]]:
-        aggregated_parameters, aggregated_metrics = super().aggregate_fit(
-            server_round, results, failures
+        aggregated_parameters = aggregate_arrayrecords(
+            train_records,
+            self.weighted_by_key,
+        )
+
+        metric_records = [msg.content for msg in valid_replies]
+
+        aggregated_metrics = self.train_metrics_aggr_fn(
+            metric_records,
+            self.weighted_by_key,
         )
 
         if aggregated_parameters is not None:
             net = self.load_and_update_model(aggregated_parameters)            
-            full_parameters = {k:val.detach() for k, val in net.model.state_dict().items()}
+            full_parameters = {k:val.detach() for k, val in net.model.state_dict().items() \
+                               if not k.endswith(('running_mean', 'running_var', 'num_batches_tracked'))}
             return full_parameters, aggregated_metrics
             
         return aggregated_parameters, aggregated_metrics
+
+    def configure_evaluate(
+            self,
+            server_round:int,
+            arrays:ArrayRecord,
+            config:ConfigRecord,
+            grid:Grid,
+    ) -> Iterable[Message]:
+        if self.fraction_evaluate == 0.0:
+            return []
+
+        # Sample nodes
+        num_nodes = int(len(list(grid.get_node_ids())) * self.fraction_evaluate)
+        sample_size = max(num_nodes, self.min_evaluate_nodes)
+        node_ids, num_total = sample_nodes(grid, self.min_available_nodes, sample_size)
+        log(
+            INFO,
+            "configure_evaluate: Sampled %s nodes (out of %s)",
+            len(node_ids),
+            len(num_total),
+        )
+
+        # Always inject current server round
+        config["server-round"] = server_round
+
+        # Construct messages
+        record = RecordDict(
+            {self.arrayrecord_key: arrays, self.configrecord_key: config}
+        )
+        return self._construct_messages(record, node_ids, MessageType.EVALUATE)
+
+    def start(
+            self,
+            grid:Grid,
+            initial_arrays:ArrayRecord,
+            untrainable_parameters:ArrayRecord,
+            num_rounds:int=3,
+            timeout:float=3600,
+            train_config: Optional[ConfigRecord] = None,
+            evaluate_config: Optional[ConfigRecord] = None,
+            evaluate_fn: Optional[
+                Callable[[int, ArrayRecord], Optional[MetricRecord]]
+            ] = None,
+    ) -> Result:
+        log(INFO, "Starting %s strategy:", self.__class__.__name__)
+        log_strategy_start_info(
+            num_rounds, initial_arrays, train_config, evaluate_config
+        )
+        self.summary()
+        log(INFO, "")
+
+        # Initialize if None
+        train_config = ConfigRecord() if train_config is None else train_config
+        evaluate_config = ConfigRecord() if evaluate_config is None else evaluate_config
+        result = Result()
+
+        t_start = time.time()
+        # Evaluate starting global parameters
+        if evaluate_fn:
+            res = evaluate_fn(0, initial_arrays)
+            log(INFO, "Initial global evaluation results: %s", res)
+            if res is not None:
+                result.evaluate_metrics_serverapp[0] = res
+            
+        arrays = initial_arrays
+        self.untrain_arrays[0] = untrainable_parameters.to_numpy_ndarrays()
+
+        for current_round in range(1, num_rounds+1):
+            log(INFO, "")
+            log(INFO, "[ROUND %s %s]", current_round, num_rounds)
+
+            train_replies = grid.send_and_receive(
+                messages=self.configure_train(
+                    current_round,
+                    arrays,
+                    train_config,
+                    grid,
+                ),
+                timeout=timeout,
+            )
+
+            agg_arrays, agg_train_metrics = self.aggregate_train(
+                current_round, train_replies
+            )
+
+            if agg_arrays is not None:
+                result.arrays = agg_arrays
+                arrays = agg_arrays
+            if agg_train_metrics is not None:
+                log(INFO, "\t└──> Aggregated MetricRecord: %s", agg_train_metrics)
+                result.train_metrics_clientapp[current_round] = agg_train_metrics
+
+            evaluate_replies = grid.send_and_receive(
+                messages=self.configure_evaluate(
+                    current_round,
+                    arrays,
+                    evaluate_config,    
+                    grid,
+                ),
+                timeout=timeout,
+            )
+
+            agg_evaluate_metrics = self.aggregate_evaluate(
+                current_round,
+                evaluate_replies,
+            )
+
+            # Log training metrics and append to history
+            if agg_evaluate_metrics is not None:
+                log(INFO, "\t└──> Aggregated MetricRecord: %s", agg_evaluate_metrics)
+                result.evaluate_metrics_clientapp[current_round] = agg_evaluate_metrics
+
+            # Centralized evaluation
+            if evaluate_fn:
+                log(INFO, "Global evaluation")
+                res = evaluate_fn(current_round, arrays)
+                log(INFO, "\t└──> MetricRecord: %s", res)
+                if res is not None:
+                    result.evaluate_metrics_serverapp[current_round] = res
+
+        log(INFO, "")
+        log(INFO, "Strategy execution finished in %.2fs", time.time() - t_start)
+        log(INFO, "")
+        log(INFO, "Final results:")
+        log(INFO, "")
+        for line in io.StringIO(str(result)):
+            log(INFO, "\t%s", line.strip("\n"))
+        log(INFO, "")
+
+        return result

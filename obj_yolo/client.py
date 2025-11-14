@@ -9,7 +9,6 @@ from flwr.clientapp import ClientApp
 from obj_yolo.utils import train as train_fn
 from obj_yolo.utils import test as test_fn
 from obj_yolo.utils import eval_train as train_val_fn
-from obj_yolo.strategy import get_section_parameters
 
 from ultralytics import YOLO
 from ultralytics.utils.torch_utils import unwrap_model
@@ -34,8 +33,14 @@ def train(msg:Message, context:Context):
     # load new model instance everytime we run a client train
     model = YOLO(YOLO_CONFIG)
     new_arrays = msg.content['arrays'].to_torch_state_dict()
-    state_dict = model.model.state_dict().copy()
-    state_dict.update(new_arrays)
+    untrainable_parameters = msg.content['untrain_arrays'].to_torch_state_dict()
+    if not untrainable_parameters:
+        state_dict = model.model.state_dict().copy()
+        state_dict.update(new_arrays)
+    else:
+        state_dict = model.model.state_dict().copy()
+        state_dict.update(new_arrays)
+        state_dict.update(untrainable_parameters)
     model.model.load_state_dict(state_dict, strict=True)
 
     # load configuration
@@ -57,27 +62,23 @@ def train(msg:Message, context:Context):
     # construct the state dict of the model
     unwrapped_model = unwrap_model(model)
     state_dict = unwrapped_model.model.state_dict()
-    detached_weights = {
-        k: v.detach()
-        for k, v in state_dict.items()
-        if isinstance(v, torch.Tensor)
-    }
-    backbone_weights, neck_weights, head_weights = get_section_parameters(state_dict=detached_weights)
-    all_keys = detached_weights.keys()
-    relevant_state_dict = {}
-
-    for k in all_keys:
-        if (k in backbone_weights) or (k in neck_weights) or (k in head_weights):
-            relevant_state_dict[k] = detached_weights[k]
-
+    trainable_parameters = {}
+    untrainable_parameters = {}
+    for k, val in state_dict.items():
+        if k.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
+            untrainable_parameters[k] = val
+        if isinstance(val, torch.Tensor):
+            trainable_parameters[k] = val
+    
     # construct record and store them
-    model_record = ArrayRecord(relevant_state_dict)
+    model_record = ArrayRecord(trainable_parameters)
+    parameter_record = ArrayRecord(untrainable_parameters)
     metrics = {
         'train-map':train_metrics,
         'num-examples':data_count,
     }
     metrics_record = MetricRecord(metrics)
-    content = RecordDict({"arrays" : model_record, "metrics" : metrics_record})
+    content = RecordDict({"arrays" : model_record, "metrics" : metrics_record, "untrain_arrays" : parameter_record})
     return Message(content=content, reply_to=msg)
 
 @client_app.evaluate()
@@ -87,11 +88,17 @@ def evaluate(msg:Message, context:Context):
     BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
     YOLO_CONFIG = Path(BASE_DIR_PATH) / "yolo_config" / "yolo11n.yaml"
 
-    # load new model instance everytime we run a client train
+    # load a new model instance
     model = YOLO(YOLO_CONFIG)
     new_arrays = msg.content['arrays'].to_torch_state_dict()
-    state_dict = model.model.state_dict().copy()
-    state_dict.update(new_arrays)
+    untrainable_parameters = msg.content['untrain_arrays'].to_torch_state_dict()
+    if not untrainable_parameters:
+        state_dict = model.model.state_dict().copy()
+        state_dict.update(new_arrays)
+    else:
+        state_dict = model.model.state_dict().copy()
+        state_dict.update(new_arrays)
+        state_dict.update(untrainable_parameters)
     model.model.load_state_dict(state_dict, strict=True)
 
     # load the data

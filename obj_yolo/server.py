@@ -10,7 +10,7 @@ from ultralytics import YOLO
 from ultralytics.utils.torch_utils import unwrap_model
 
 from obj_yolo.strategy import CustomFedAvg
-from obj_yolo.strategy import CustomFedAdam
+#from obj_yolo.strategy import CustomFedAdam
 
 server_app = ServerApp()
 
@@ -39,12 +39,16 @@ def main(grid:Grid, context:Context) -> None:
     # record global model state
     unwrapped_model = unwrap_model(global_model)
     state_dict = unwrapped_model.model.state_dict()
-    tensor_state_dict = {
-        k: v.detach()
-        for k, v in state_dict.items()
-        if isinstance(v, torch.Tensor)
-    }
-    arrays = ArrayRecord(tensor_state_dict, keep_input=True)
+    trainable_parameters = {}
+    untrainable_parameters = {}
+    for k, val in state_dict.items():
+        if k.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
+            untrainable_parameters[k] = val
+        elif isinstance(val, torch.Tensor):
+            trainable_parameters[k] = val
+    
+    arrays = ArrayRecord(trainable_parameters, keep_input=True)
+    untrain_arrays = ArrayRecord(untrainable_parameters)
 
     # Initialize FedAvg strategy
     strategy = CustomFedAvg(
@@ -71,6 +75,7 @@ def main(grid:Grid, context:Context) -> None:
     result = strategy.start(
         grid=grid,
         initial_arrays=arrays,
+        untrainable_parameters=untrain_arrays,
         train_config=ConfigRecord({"lr": lr}),
         num_rounds=num_rounds,
     )
