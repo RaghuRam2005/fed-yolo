@@ -105,11 +105,9 @@ clientapp = "obj_yolo.client:client_app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
-train-data-count=1000
-val-data-count=200
-num-server-rounds = 3
+num-server-rounds = 20
 fraction-train = 1.0
-local-epochs = 2
+local-epochs = 5
 lr = 0.01
 
 [tool.setuptools]
@@ -119,6 +117,6 @@ packages = ["obj_yolo"]
 default = "local-simulation"
 
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 5
+options.num-supernodes = 3
 options.backend.client-resources.num-cpus = 2
-options.backend.client-resources.num-gpus = 0.5
+options.backend.client-resources.num-gpus = 0.3

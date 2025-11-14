@@ -54,9 +54,9 @@ def main(grid:Grid, context:Context) -> None:
     strategy = CustomFedAvg(
         fraction_train=fraction_train, 
         fraction_evaluate=1.0, 
-        min_train_nodes=2,
-        min_evaluate_nodes=2, 
-        min_available_nodes=2
+        min_train_nodes=3,
+        min_evaluate_nodes=3, 
+        min_available_nodes=3,
     )
     #strategy = CustomFedAdam(
     #    fraction_train=fraction_train,
