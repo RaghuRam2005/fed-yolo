@@ -1,114 +1,113 @@
 # util.py
-from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List
-
-import torch
-from torch.nn.modules.batchnorm import _BatchNorm
+from pathlib import Path
 
 from ultralytics.engine.model import Model
-from ultralytics.engine.results import Results
-from ultralytics.utils.torch_utils import unwrap_model
 
-@dataclass
-class DataConfigTag:
-    weather_dict:Dict[str, List]
-    scene_dict:Dict[str, List]
+def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:float):
+    train_results = model.train(
+        data=data_path,
+        epochs=local_epochs,
 
-@dataclass
-class ServerConfigFedWeg:
-    """
-    Sever Configuration
-    """
-    client_model_path:str
-    client_train_data_count:int
-    client_val_data_count:int
-    communication_rounds:int=2
-    num_nodes:int=2
-
-@dataclass
-class ServerConfigFedTag:
-    client_model_path:str
-    client_tag_dict:Dict
-    client_train_data_count:int
-    client_val_data_count:int
-    communication_rounds:int=2
-    num_nodes:int=2
-
-@dataclass
-class FitConfig:
-    """
-    Fit configuration class for clients
-    """
-    epochs:int=10
-
-@dataclass
-class FitResFedWeg:
-    """
-    FitRes is a data class representing the result of a client's fit operation.
-    """
-    delta:Dict[str, Optional[Tuple]]
-    metrics:Results
-    sparsity:float
-    
-def model_state(model:Model) -> Dict[str, torch.Tensor]:
-    unwrapped_model = unwrap_model(model)
-    return unwrapped_model.model.model.state_dict()
-
-def client_train(model:Model, data_path:str, client_id:int, epochs:int) -> Results:
-    # training the local model
-    results = model.train(
-        data = data_path,
-        epochs=epochs,
-        device=-1,
-        batch=8,
+        batch=16,
         imgsz=640,
-        save=False, # client doesn't have much storage
-        cache='disk',
-        project="fed_yolo",
-        name=f"client_{client_id}_train",
+        device=0,
+        
+        save=False,
+        cache=False,
+        plots=False,
+        
+        project='flwr_simulation',
+        name=f'client_{partition_id}_train',
         exist_ok=True,
-        optimizer='auto',
-        seed=32,
+
+        pretrained=False,
+
+        optimizer='Adam',
+        
+        seed=42,
         deterministic=True,
-        freeze=0,
-        plots=True, # useful for verification
-        l1_lambda=1e-4,
+        amp=True,
+        freeze=None,
+
+        lr0=lr0,
+        
+        val=True,
+
+        # hyprparameters
+
+        hsv_h=0.020,
+        hsv_s=0.7,
+        hsv_v=0.4,
+        degrees=0.0,
+        translate=0.1,
+        scale=0.5,
+        shear=0.0,
+        perspective=0.0,
+        flipud=0.0,
+        fliplr=0.5,
+        bgr=0.0,
+        mosaic=1.0,
     )
-    return results
+    return train_results.box.map
 
-def to_coo(t:torch.Tensor, tau:float) -> torch.Tensor:
-    """
-    Converts a dense tensor to a sparse COO tensor by thresholding absolute values.
+def test(partition_id:int, model:Model, data_path:Path):
+    validation_results = model.val(
+        data=data_path,
+        
+        imgsz=640,
+        batch=16,
+        device=0,
 
-    Args:
-        t (torch.Tensor): The input dense tensor.
-        tau (float): Threshold value; elements with absolute value greater than tau are kept.
+        plots=False,
 
-    Returns:
-        torch.Tensor: A sparse COO tensor containing only the elements of `t` whose absolute value exceeds `tau`.
-    """
-    m = t.abs() > tau
-    idx = m.nonzero(as_tuple=False).T
-    vals = t[m].float()
-    return torch.sparse_coo_tensor(indices=idx, values=vals, size=t.shape).coalesce()
+        project='flwr_simulation',
+        name=f'client_{partition_id}_val',
+    )
+    return validation_results.box.map
 
-def from_coo(t:torch.Tensor) -> torch.Tensor:
-    """
-    Converts a sparse COO tensor to a dense tensor.
+def eval_train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:float):
+    train_results = model.train(
+        data=data_path,
+        epochs=local_epochs,
 
-    Args:
-        s (torch.Tensor): A sparse tensor in COO format.
+        batch=16,
+        imgsz=640,
+        device=0,
+        
+        save=False,
+        cache=False,
+        plots=False,
+        
+        project='flwr_simulation',
+        name=f'client_{partition_id}_eval_train',
+        exist_ok=True,
 
-    Returns:
-        torch.Tensor: The dense representation of the input tensor.
-    """
-    return t.to_dense()
+        pretrained=False,
 
-def update_sparsity_for_all_clients(fedtag, clients, results) -> None:
-    sorted_results = dict(sorted(results.items(), key=lambda item: item[1], reverse=True))
-    result_keys = list(sorted_results.keys())
-    mid = len(result_keys) // 2
-    change_value_dict = {k:0.1 if i < mid else -0.1 for i, k in enumerate(result_keys)}
-    for client in clients:
-        client.sparsity = fedtag.update_sparsity(current_sparsity=client.sparsity, change=change_value_dict[client.tag])
+        optimizer='Adam',
+        
+        seed=42,
+        deterministic=True,
+        amp=True,
+        freeze=None,
 
+        lr0=lr0,
+        
+        val=True,
+
+        # hyprparameters
+
+        hsv_h=0.020,
+        hsv_s=0.7,
+        hsv_v=0.4,
+        degrees=0.0,
+        translate=0.1,
+        scale=0.5,
+        shear=0.0,
+        perspective=0.0,
+        flipud=0.0,
+        fliplr=0.5,
+        bgr=0.0,
+        mosaic=1.0,
+    )
+    return train_results.box.map

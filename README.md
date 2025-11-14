@@ -28,27 +28,11 @@ This project showcases object detection using the Ultralytics YOLO model, traine
 
 ## Getting Started
 
-To set up and run the project:
+1. **Run the Simulation using:**
 
-1. **Clone the repository**
     ```bash
-    git clone https://github.com/RaghuRam2005/obj_yolo.git
-    cd obj_yolo
-    ```
-
-2. **Install Python package manager [uv](https://docs.astral.sh/uv/getting-started/installation/)**
-    - Follow the [official installation guide](https://docs.astral.sh/uv/getting-started/installation/).
-
-3. **Download KITTI images and YOLO-formatted labels**
-    - Get images from the [KITTI site](https://www.cvlibs.net/datasets/kitti/eval_object.php?obj_benchmark=2d).
-    - Download YOLO labels from [Kaggle](https://www.kaggle.com/datasets) or convert original labels using provided scripts.
-
-4. **Set up folders**
-    - Extract images and labels into the same base directory.
-
-5. **Run the simulation**
-    ```bash
-    uv run simulation.py
+    
+    flwr run .
     ```
 
 ## References

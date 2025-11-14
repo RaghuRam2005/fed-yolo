@@ -1,158 +1,394 @@
-# strategy.py
-import random
-from typing import List, Dict, Optional
-from abc import ABC, abstractmethod
+""" strategy for federated learning """
+import io
+import os
+import time
+from logging import INFO
+from pathlib import Path
+from typing import Optional, Callable, Iterable
 
-import torch
-
-from ultralytics.engine.results import Results
-
-from .client import FedWegClient, FedTagClient
-from .dataset import KittiData, BddData
-from .utils import (
-    FitConfig,
-    FitResFedWeg,
-    from_coo,
+from flwr.common import (
+    Parameters, 
+    Scalar, 
+    log,
+    RecordDict,
+    ConfigRecord,
+    ArrayRecord,
+    Message,
+    MessageType,
+    MetricRecord,
+    parameters_to_ndarrays,
 )
+from flwr.server import Grid
+from flwr.serverapp.strategy import FedAvg, Result
+from flwr.serverapp.strategy.strategy_utils import (
+    log_strategy_start_info, 
+    sample_nodes,
+    aggregate_arrayrecords,
+)
+from flwr.serverapp.exception import InconsistentMessageReplies
 
-class Strategy(ABC):
-    @abstractmethod
-    def configure_fit(self):
-        pass
+from ultralytics import YOLO
 
-    @abstractmethod
-    def aggregate_fit(self):
-        pass
+def validate_message_reply_consistency(
+    replies: list[RecordDict], weighted_by_key:str, check_arrayrecord:bool
+) -> None:
+    """Validate that replies contain exactly one ArrayRecord and one MetricRecord, and
+    that the MetricRecord includes a weight factor key.
 
-    @abstractmethod
-    def aggregate_evaluate(self):
-        pass
-
-class FedWeg(Strategy):
-    def __init__(self, data_class:KittiData, initial_sparsity:float=0.2, min_clients:int=2, client_epochs:int=10) -> None:
-        self.min_clients_for_aggregation = min_clients
-        self.initial_sparsity=initial_sparsity
-        self.data_class = data_class
-        self.client_epochs = client_epochs
-
-    def configure_fit(self, num_supernodes:int, model_path:str, train_data_count:int, val_data_count:int) -> List[FedWegClient]:
-        if self.min_clients_for_aggregation < num_supernodes:
-            raise Exception(f"Min Clients for aggregation ({self.min_clients_for_aggregation}), exceeds the given clients({num_supernodes})")
-        
-        clients = []
-        for x in range(num_supernodes):
-            fitconfig = FitConfig(epochs=self.client_epochs)
-            client = FedWegClient(model_path=model_path, client_id=x, sparsity=self.initial_sparsity, fitconfig=fitconfig)
-            client.prepare_data(
-                data_class=self.data_class,
-                train_data_count=train_data_count,
-                val_data_count=val_data_count
+    These checks ensure that Message-based strategies behave consistently with
+    *Ins/*Res-based strategies.
+    """
+    # Checking for ArrayRecord consistency
+    if check_arrayrecord:
+        if any(len(msg.array_records) != 2 for msg in replies):
+            raise InconsistentMessageReplies(
+                reason="Expected exactly two ArrayRecord in replies. "
+                "Skipping aggregation."
             )
-            clients.append(client)
-        return clients
+
+        # Ensure all key are present in all ArrayRecords
+        record_key = next(iter(replies[0].array_records.keys()))
+        all_keys = set(replies[0][record_key].keys())
+        if any(set(msg.get(record_key, {}).keys()) != all_keys for msg in replies[1:]):
+            raise InconsistentMessageReplies(
+                reason="All ArrayRecords must have the same keys for aggregation. "
+                "This condition wasn't met. Skipping aggregation."
+            )
+
+    # Checking for MetricRecord consistency
+    if any(len(msg.metric_records) != 1 for msg in replies):
+        raise InconsistentMessageReplies(
+            reason="Expected exactly one MetricRecord in replies, but found more. "
+            "Skipping aggregation."
+        )
+
+    # Ensure all key are present in all MetricRecords
+    record_key = next(iter(replies[0].metric_records.keys()))
+    all_keys = set(replies[0][record_key].keys())
+    if any(set(msg.get(record_key, {}).keys()) != all_keys for msg in replies[1:]):
+        raise InconsistentMessageReplies(
+            reason="All MetricRecords must have the same keys for aggregation. "
+            "This condition wasn't met. Skipping aggregation."
+        )
+
+    # Verify the weight factor key presence in all MetricRecords
+    if weighted_by_key not in all_keys:
+        raise InconsistentMessageReplies(
+            reason=f"Missing required key `{weighted_by_key}` in the MetricRecord of "
+            "reply messages. Cannot average ArrayRecords and MetricRecords. Skipping "
+            "aggregation."
+        )
+
+    # Check that it is not a list
+    if any(isinstance(msg[record_key][weighted_by_key], list) for msg in replies):
+        raise InconsistentMessageReplies(
+            reason=f"Key `{weighted_by_key}` in the MetricRecord of reply messages "
+            "must be a single value (int or float), but a list was found. Skipping "
+            "aggregation."
+        )
+
+class CustomFedAvg(FedAvg):
+    """
+    FedAvg class that works with YOLO architecture
+    """
+    def __init__(self, *, fraction_train = 1, fraction_evaluate = 1, min_train_nodes = 2, min_evaluate_nodes = 2, min_available_nodes = 2):
+        super().__init__(fraction_train=fraction_train, fraction_evaluate=fraction_evaluate, min_train_nodes=min_train_nodes, min_evaluate_nodes=min_evaluate_nodes, min_available_nodes=min_available_nodes)
+        BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
+        BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
+        self.model_path = Path(BASE_DIR_PATH) / "yolo_config" / "yolo11n.yaml"
+        self.untrain_record_key = "untrain_arrays"
+        self.untrain_arrays : dict[str, ArrayRecord] = {}
     
-    def aggregate_fit(
+    def __repr__(self):
+        rep = f"FedAveraging merged with ultralytics, accept failures = {self.accept_failures}"
+        return rep
+    
+    def _construct_messages(
+            self, 
+            record:RecordDict,
+            node_ids:list[int],
+            message_type:str
+    ) -> Iterable[Message]:
+        messages = []
+        for node_id in node_ids:
+            record[self.untrain_record_key] = self.untrain_arrays.get(
+                node_id,
+                self.untrain_arrays.get(0, None)
+            )
+            message = Message(
+                content=record,
+                message_type=message_type,
+                dst_node_id=node_id,
+            )
+            messages.append(message)
+        return messages
+
+    def _check_and_log_replies(
+        self, replies: Iterable[Message], is_train: bool, validate: bool = True
+    ) -> tuple[list[Message], list[Message]]:
+        """Check replies for errors and log them.
+
+        Parameters
+        ----------
+        replies : Iterable[Message]
+            Iterable of reply Messages.
+        is_train : bool
+            Set to True if the replies are from a training round; False otherwise.
+            This impacts logging and validation behavior.
+        validate : bool (default: True)
+            Whether to validate the reply contents for consistency.
+
+        Returns
+        -------
+        tuple[list[Message], list[Message]]
+            A tuple containing two lists:
+            - Messages with valid contents.
+            - Messages with errors.
+        """
+        if not replies:
+            return [], []
+
+        # Filter messages that carry content
+        valid_replies: list[Message] = []
+        error_replies: list[Message] = []
+        for msg in replies:
+            if msg.has_error():
+                error_replies.append(msg)
+            else:
+                valid_replies.append(msg)
+
+        log(
+            INFO,
+            "%s: Received %s results and %s failures",
+            "aggregate_train" if is_train else "aggregate_evaluate",
+            len(valid_replies),
+            len(error_replies),
+        )
+
+        # Log errors
+        for msg in error_replies:
+            log(
+                INFO,
+                "\t> Received error in reply from node %d: %s",
+                msg.metadata.src_node_id,
+                msg.error.reason,
+            )
+
+        # Ensure expected ArrayRecords and MetricRecords are received
+        if validate and valid_replies:
+            validate_message_reply_consistency(
+                replies=[msg.content for msg in valid_replies],
+                weighted_by_key=self.weighted_by_key,
+                check_arrayrecord=is_train,
+            )
+
+        return valid_replies, error_replies
+    
+    def configure_train(
             self,
-            global_state: Dict[str, torch.Tensor], 
-            results: List[FitResFedWeg]
-        ) -> Dict[str, torch.Tensor]:
-        """
-        Aggregate the clients using Inverse sparsity method
-        """
-        assert len(results) == self.min_clients_for_aggregation, \
-                f"Expected at least {self.min_clients_for_aggregation} clients, got {len(results)}"
+            server_round:int, 
+            arrays: ArrayRecord,
+            config: ConfigRecord,
+            grid:Grid,
+        ) -> Iterable[Message]:
+        if self.fraction_train == 0.0:
+            return []
+        # Sample nodes
+        num_nodes = int(len(list(grid.get_node_ids())) * self.fraction_train)
+        sample_size = max(num_nodes, self.min_train_nodes)
+        node_ids, num_total = sample_nodes(grid, self.min_available_nodes, sample_size)
+        log(
+            INFO,
+            "configure_train: Sampled %s nodes (out of %s)",
+            len(node_ids),
+            len(num_total),
+        )
+        # Always inject current server round
+        config["server-round"] = server_round
 
-        # compute inverse sparse weights
-        sparsities = [res.sparsity for res in results]
-        inv_sparsities = [1.0 / max(s, 0.2) for s in sparsities]
-        inv_sparsity_sum = sum(inv_sparsities)
+        # Construct messages
+        record = RecordDict(
+            {self.arrayrecord_key: arrays, self.configrecord_key: config}
+        )
+        return self._construct_messages(record, node_ids, MessageType.TRAIN)
 
-        # Initialize aggregated states
-        agg_state = {k: v.clone().detach() for k, v in global_state.items()}
 
-        # Check key consistency
-        #expected_keys = {k for k in agg_state.keys() if not k.endswith(('running_mean', 'running_var', 'num_batches_tracked'))}
-        #all_delta_keys = set().union(*(res.delta.keys() for res in results))
-        #assert expected_keys == all_delta_keys, \
-        #       f"Key mismatch at delta keys and agg keys, missing: {expected_keys - all_delta_keys}, extra: {all_delta_keys - expected_keys}"
+    def load_and_update_model(self, aggregated_state:ArrayRecord) -> YOLO:
+        net = YOLO(self.model_path).load('yolo11n.pt')
+        state_dict = net.model.state_dict().copy()
+        state_dict.update(aggregated_state.to_torch_state_dict())
+        net.model.load_state_dict(state_dict)
+        return net
 
-        # Aggregate client updates
-        for i, res in enumerate(results):
-            weight = inv_sparsities[i] / inv_sparsity_sum
-            for key, delta in res.delta.items():
-                if key.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-                    continue
-                if isinstance(delta, torch.Tensor) and delta.is_sparse:
-                    dense_delta = from_coo(delta)
-                    agg_state[key] += weight * dense_delta
-                elif isinstance(delta, torch.Tensor):
-                    agg_state[key] += weight * delta
-                else:
-                    raise TypeError(f"Delta for key {key} is not a torch.Tensor")
+    def aggregate_train(
+        self,
+        server_round: int,
+        replies: Iterable[Message]
+    ) -> tuple[Optional[ArrayRecord], Optional[MetricRecord]]:
+        """Aggregate model weights using weighted average and store checkpoint."""
+        valid_replies, _ = self._check_and_log_replies(replies, is_train=True)
 
-        #assert list(agg_state.keys()) == list(expected_keys), \
-        #       f"Key mistch of agg state after aggregation, missing {expected_keys - agg_state.keys()}, extra: {agg_state.keys() - expected_keys}"
+        train_records = []
 
-        return agg_state
-    
-    def aggregate_evaluate(self, agg_state:Dict[str, torch.Tensor], clients:Optional[List[FedWegClient]], data_path:str) -> List[Results]:
-        agg_results = []
-        for client in clients:
-            client.update_model(parameters=agg_state)
-            result = client.evaluate(data_path=data_path)
-            agg_results.append(result)
-        return agg_results
-    
-    def update_sparsity(self, rounds_participated:int) -> float:
-        min_sparsity = 0.2
-        max_sparsity = 0.8
+        for msg in valid_replies:
+            train_array = msg.content[self.arrayrecord_key]
+            metric_array = msg.content['metrics']
+            nid = msg.metadata.src_node_id
+            client_untrain = msg.content[self.untrain_record_key]
+            self.untrain_arrays[nid] = client_untrain
 
-        new_sparsity = min_sparsity + (rounds_participated * 0.1)
-        sparsity_tensor = torch.clip(torch.tensor(new_sparsity), min=min_sparsity, max=max_sparsity)
-        return sparsity_tensor.item()
-
-class FedTag(FedWeg):
-    def __init__(self, data_class:BddData, initial_sparsity:float, min_clients:int=2, client_epochs:int=10):
-        super().__init__(data_class=data_class,initial_sparsity=initial_sparsity, min_clients=min_clients, client_epochs=client_epochs)
-        self.client_tag_info:Dict = None
-
-    def configure_fit(self, num_supernodes:int, model_path:str, tag_dict:Dict, train_data_count:int, val_data_count:int) -> List[FedTagClient]:
-        clients = []
-        client_tag_info = {}
-        for client_id in range(num_supernodes):
-            tag = random.choice(list(tag_dict.keys()))
-            print(f'client_{client_id}: {tag}')
-            fitconfig = FitConfig(epochs=self.client_epochs)
-            client = FedTagClient(model_path=model_path, client_id=client_id, \
-                    sparsity=self.initial_sparsity, tag=tag, fitconfig=fitconfig)
-            print(client.tag)
-            image_list = tag_dict[client.tag]
-            random.shuffle(image_list)
-            train_img_list = image_list[:train_data_count]
-            val_img_list = image_list[train_data_count:train_data_count+val_data_count]
-            print("Train img list: ", len(train_img_list))
-            print("Val img list: ", len(val_img_list))
-            client.prepare_data(
-                data_class=self.data_class,
-                train_img_list=train_img_list,
-                val_img_list=val_img_list,
+            record = RecordDict(
+                {self.arrayrecord_key: train_array, 'metrics':metric_array}
             )
-            tag_info = client_tag_info.get(client.tag, [])
-            tag_info.append(client.client_id)
-            client_tag_info[client.tag] = tag_info
-            clients.append(client)
-        print("client_tag_info: ", client_tag_info)
-        self.client_tag_info = client_tag_info
-        return clients
-    
-    def update_sparsity(self, current_sparsity:float, change:float) -> float:
-        min_sparsity = 0.2
-        max_sparsity = 0.8
 
-        new_sparsity = current_sparsity + change
-        sparsity_tensor = torch.clip(torch.tensor(new_sparsity), min=min_sparsity, max=max_sparsity)
-        return sparsity_tensor.item()
+            train_records.append(record)
+        
+        aggregated_parameters = aggregate_arrayrecords(
+            train_records,
+            self.weighted_by_key,
+        )
 
-    def get_tag_dict(self):
-        return self.client_tag_info
-    
+        metric_records = [msg.content for msg in valid_replies]
+
+        aggregated_metrics = self.train_metrics_aggr_fn(
+            metric_records,
+            self.weighted_by_key,
+        )
+
+        if aggregated_parameters is not None:
+            net = self.load_and_update_model(aggregated_parameters)            
+            full_parameters = {k:val.detach() for k, val in net.model.state_dict().items() \
+                               if not k.endswith(('running_mean', 'running_var', 'num_batches_tracked'))}
+            return ArrayRecord(full_parameters), aggregated_metrics
+            
+        return aggregated_parameters, aggregated_metrics
+
+    def configure_evaluate(
+            self,
+            server_round:int,
+            arrays:ArrayRecord,
+            config:ConfigRecord,
+            grid:Grid,
+    ) -> Iterable[Message]:
+        if self.fraction_evaluate == 0.0:
+            return []
+
+        # Sample nodes
+        num_nodes = int(len(list(grid.get_node_ids())) * self.fraction_evaluate)
+        sample_size = max(num_nodes, self.min_evaluate_nodes)
+        node_ids, num_total = sample_nodes(grid, self.min_available_nodes, sample_size)
+        log(
+            INFO,
+            "configure_evaluate: Sampled %s nodes (out of %s)",
+            len(node_ids),
+            len(num_total),
+        )
+
+        # Always inject current server round
+        config["server-round"] = server_round
+
+        # Construct messages
+        record = RecordDict(
+            {self.arrayrecord_key: arrays, self.configrecord_key: config}
+        )
+        return self._construct_messages(record, node_ids, MessageType.EVALUATE)
+
+    def start(
+            self,
+            grid:Grid,
+            initial_arrays:ArrayRecord,
+            untrainable_parameters:ArrayRecord,
+            num_rounds:int=3,
+            timeout:float=3600,
+            train_config: Optional[ConfigRecord] = None,
+            evaluate_config: Optional[ConfigRecord] = None,
+            evaluate_fn: Optional[
+                Callable[[int, ArrayRecord], Optional[MetricRecord]]
+            ] = None,
+    ) -> Result:
+        log(INFO, "Starting %s strategy:", self.__class__.__name__)
+        log_strategy_start_info(
+            num_rounds, initial_arrays, train_config, evaluate_config
+        )
+        self.summary()
+        log(INFO, "")
+
+        # Initialize if None
+        train_config = ConfigRecord() if train_config is None else train_config
+        evaluate_config = ConfigRecord() if evaluate_config is None else evaluate_config
+        result = Result()
+
+        t_start = time.time()
+        # Evaluate starting global parameters
+        if evaluate_fn:
+            res = evaluate_fn(0, initial_arrays)
+            log(INFO, "Initial global evaluation results: %s", res)
+            if res is not None:
+                result.evaluate_metrics_serverapp[0] = res
+            
+        arrays = initial_arrays
+        self.untrain_arrays[0] = untrainable_parameters
+
+        for current_round in range(1, num_rounds+1):
+            log(INFO, "")
+            log(INFO, "[ROUND %s %s]", current_round, num_rounds)
+
+            train_replies = grid.send_and_receive(
+                messages=self.configure_train(
+                    current_round,
+                    arrays,
+                    train_config,
+                    grid,
+                ),
+                timeout=timeout,
+            )
+
+            agg_arrays, agg_train_metrics = self.aggregate_train(
+                current_round, train_replies
+            )
+
+            if agg_arrays is not None:
+                result.arrays = agg_arrays
+                arrays = agg_arrays
+            if agg_train_metrics is not None:
+                log(INFO, "\t└──> Aggregated MetricRecord: %s", agg_train_metrics)
+                result.train_metrics_clientapp[current_round] = agg_train_metrics
+
+            evaluate_replies = grid.send_and_receive(
+                messages=self.configure_evaluate(
+                    current_round,
+                    arrays,
+                    evaluate_config,    
+                    grid,
+                ),
+                timeout=timeout,
+            )
+
+            agg_evaluate_metrics = self.aggregate_evaluate(
+                current_round,
+                evaluate_replies,
+            )
+
+            # Log training metrics and append to history
+            if agg_evaluate_metrics is not None:
+                log(INFO, "\t└──> Aggregated MetricRecord: %s", agg_evaluate_metrics)
+                result.evaluate_metrics_clientapp[current_round] = agg_evaluate_metrics
+
+            # Centralized evaluation
+            if evaluate_fn:
+                log(INFO, "Global evaluation")
+                res = evaluate_fn(current_round, arrays)
+                log(INFO, "\t└──> MetricRecord: %s", res)
+                if res is not None:
+                    result.evaluate_metrics_serverapp[current_round] = res
+
+        log(INFO, "")
+        log(INFO, "Strategy execution finished in %.2fs", time.time() - t_start)
+        log(INFO, "")
+        log(INFO, "Final results:")
+        log(INFO, "")
+        for line in io.StringIO(str(result)):
+            log(INFO, "\t%s", line.strip("\n"))
+        log(INFO, "")
+
+        return result

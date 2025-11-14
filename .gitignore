@@ -30,3 +30,7 @@ ultralytics/
 base_data/
 prepared_data/
 bdd100k*
+dataset/
+labels/
+training/
+testing/
