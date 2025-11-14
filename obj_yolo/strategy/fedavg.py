@@ -38,7 +38,7 @@ class CustomFedAvg(FedAvg):
     def __init__(self, *, fraction_train = 1, fraction_evaluate = 1, min_train_nodes = 2, min_evaluate_nodes = 2, min_available_nodes = 2):
         super().__init__(fraction_train=fraction_train, fraction_evaluate=fraction_evaluate, min_train_nodes=min_train_nodes, min_evaluate_nodes=min_evaluate_nodes, min_available_nodes=min_available_nodes)
         BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
-        BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
+        BASE_DIR_PATH = os.path.dirname(os.path.dirname(BASE_LIB_PATH))
         self.model_path = Path(BASE_DIR_PATH) / "yolo_config" / "yolo11n.yaml"
         self.untrain_record_key = "untrain_arrays"
         self.untrain_arrays : dict[str, ArrayRecord] = {}

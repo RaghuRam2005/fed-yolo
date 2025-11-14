@@ -43,7 +43,7 @@ class CustomFedAdam(FedAdam):
     def __init__(self, *, fraction_train = 1, fraction_evaluate = 1, min_train_nodes = 2, min_evaluate_nodes = 2, min_available_nodes = 2, weighted_by_key = "num-examples", arrayrecord_key = "arrays", configrecord_key = "config", train_metrics_aggr_fn = None, evaluate_metrics_aggr_fn = None, eta = 0.1, eta_l = 0.1, beta_1 = 0.9, beta_2 = 0.99, tau = 0.001):
         super().__init__(fraction_train=fraction_train, fraction_evaluate=fraction_evaluate, min_train_nodes=min_train_nodes, min_evaluate_nodes=min_evaluate_nodes, min_available_nodes=min_available_nodes, weighted_by_key=weighted_by_key, arrayrecord_key=arrayrecord_key, configrecord_key=configrecord_key, train_metrics_aggr_fn=train_metrics_aggr_fn, evaluate_metrics_aggr_fn=evaluate_metrics_aggr_fn, eta=eta, eta_l=eta_l, beta_1=beta_1, beta_2=beta_2, tau=tau)
         BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
-        BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
+        BASE_DIR_PATH = os.path.dirname(os.path.dirname(BASE_LIB_PATH))
         self.model_path = Path(BASE_DIR_PATH) / "yolo_config" / "yolo11n.yaml"
         self.untrain_record_key = "untrain_arrays"
         self.untrain_arrays : dict[str, ArrayRecord] = {}

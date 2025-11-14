@@ -4,9 +4,9 @@ import os
 import yaml
 import shutil
 import random
+import numpy as np
 from pathlib import Path
 from collections import defaultdict
-from typing import List, Dict, Set, Tuple
 
 # KITTI dataset constants
 KITTI_NC = 8
@@ -25,7 +25,7 @@ def _read_image_class(label_path: Path) -> set[int]:
                 continue
             try:
                 cls_ids.add(int(line.split()[0]))
-            except:
+            except Exception:
                 pass
     return cls_ids
 

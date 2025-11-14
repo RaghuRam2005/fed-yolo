@@ -10,6 +10,7 @@ from ultralytics import YOLO
 from ultralytics.utils.torch_utils import unwrap_model
 
 from obj_yolo.strategy.fedavg import CustomFedAvg
+from obj_yolo.strategy.fedadam import CustomFedAdam
 
 server_app = ServerApp()
 
