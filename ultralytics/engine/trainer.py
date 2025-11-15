@@ -161,6 +161,9 @@ class BaseTrainer:
         self.model = check_model_file_from_stem(self.args.model)  # add suffix, i.e. yolo11n -> yolo11n.pt
         with torch_distributed_zero_first(LOCAL_RANK):  # avoid auto-downloading dataset multiple times
             self.data = self.get_dataset()
+        
+        self.global_model = check_model_file_from_stem(self.args.global_model)
+        self.setup_global()
 
         self.ema = None
 
@@ -293,6 +296,16 @@ class BaseTrainer:
                     "See ultralytics.engine.trainer for customization of frozen layers."
                 )
                 v.requires_grad = True
+                
+        # NEW: Extract global parameters for FedProx
+        if hasattr(self, 'global_model') and isinstance(self.global_model, nn.Module):
+            self.global_model = self.global_model.to(self.device)
+            self.global_parameters = {name: p.clone().detach() for name, p in self.global_model.named_parameters()}
+            LOGGER.info("Global model parameters loaded for FedProx.")
+        else:
+            if self.args.mu > 0:
+                 raise ValueError(f"FedProx training (mu={self.args.mu}) requires a valid 'global_model' path.")
+            self.global_parameters = {} # Set to empty dict if mu is 0
 
         # Check AMP
         self.amp = torch.tensor(self.args.amp).to(self.device)  # True or False
@@ -376,7 +389,6 @@ class BaseTrainer:
             f"Logging results to {colorstr('bold', self.save_dir)}\n"
             f"Starting training for " + (f"{self.args.time} hours..." if self.args.time else f"{self.epochs} epochs...")
         )
-        self.global_parameters = {k: v.clone().detach() for k, v in unwrap_model(self.model).named_parameters()}
         if self.args.close_mosaic:
             base_idx = (self.epochs - self.args.close_mosaic) * nb
             self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
@@ -682,6 +694,20 @@ class BaseTrainer:
         elif isinstance(self.args.pretrained, (str, Path)):
             weights, _ = load_checkpoint(self.args.pretrained)
         self.model = self.get_model(cfg=cfg, weights=weights, verbose=RANK == -1)  # calls Model(cfg, weights)
+        return ckpt
+    
+    def setup_global(self):
+        if isinstance(self.global_model, torch.nn.Module):
+            return
+        
+        cfg, weights = self.global_model, None
+        ckpt = None
+        if str(self.global_model).endswith(".pt"):
+            weights, ckpt = load_checkpoint(self.global_model)
+            cfg = weights.yaml
+        elif isinstance(self.args.pretrained, (str, Path)):
+            weights, _ = load_checkpoint(self.args.pretrained)
+        self.global_model = self.get_model(cfg=cfg, weights=weights, verbose=RANK == -1)
         return ckpt
 
     def optimizer_step(self):

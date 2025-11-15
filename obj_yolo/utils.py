@@ -3,7 +3,7 @@ from pathlib import Path
 
 from ultralytics.engine.model import Model
 
-def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:float, mu:float):
+def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:float, mu:float, model_path:str):
     train_results = model.train(
         data=data_path,
         epochs=local_epochs,
@@ -18,6 +18,7 @@ def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:f
         
         project='flwr_simulation',
         name=f'client_{partition_id}_train',
+        global_model=model_path,
         exist_ok=True,
 
         pretrained=False,

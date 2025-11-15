@@ -50,6 +50,9 @@ def train(msg:Message, context:Context):
         raise Exception(f"Data Not prepared Exception: Client-{partition_id}")
     data_count = len(os.listdir(Path(BASE_DIR_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "images" / "train"))
 
+    model_path = Path(BASE_LIB_PATH) / f"client_{partition_id}_saved_model.pt"
+    model.save(model_path)
+
     # train the model
     train_metrics = train_fn(
         partition_id=partition_id,
@@ -58,6 +61,7 @@ def train(msg:Message, context:Context):
         local_epochs=context.run_config['local-epochs'],
         lr0=msg.content["config"]["lr"],
         mu=msg.content["config"]["proximal-mu"],
+        model_path=str(model_path)
     )
 
     # construct the state dict of the model
@@ -68,7 +72,7 @@ def train(msg:Message, context:Context):
     for k, val in state_dict.items():
         if k.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
             untrainable_parameters[k] = val
-        if isinstance(val, torch.Tensor):
+        elif isinstance(val, torch.Tensor):
             trainable_parameters[k] = val
     
     # construct record and store them

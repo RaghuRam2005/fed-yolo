@@ -77,7 +77,7 @@ def main(grid:Grid, context:Context) -> None:
         min_train_nodes=2,
         min_evaluate_nodes=2,
         min_available_nodes=2,
-        proximal_mu=0.3,
+        proximal_mu=0.001,
     )
 
     # Start strategy, run FedAvg for `num_rounds`
@@ -85,7 +85,7 @@ def main(grid:Grid, context:Context) -> None:
         grid=grid,
         initial_arrays=arrays,
         untrainable_parameters=untrain_arrays,
-        train_config=ConfigRecord({"lr": lr}),
+        train_config=ConfigRecord({"lr": lr, 'proximal-mu':0.001}),
         num_rounds=num_rounds,
     )
 

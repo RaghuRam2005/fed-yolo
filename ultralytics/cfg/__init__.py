@@ -242,6 +242,11 @@ CFG_BOOL_KEYS = frozenset(
     }
 )
 
+CFG_PATH_KEYS = frozenset(
+    {
+        "global_model"
+    }
+)
 
 def cfg2dict(cfg: str | Path | dict | SimpleNamespace) -> dict:
     """Convert a configuration object to a dictionary.
@@ -385,6 +390,10 @@ def check_cfg(cfg: dict, hard: bool = True) -> None:
                         f"'{k}' must be a bool (i.e. '{k}=True' or '{k}=False')"
                     )
                 cfg[k] = bool(v)
+            elif k in CFG_PATH_KEYS:
+                if v is not None and isinstance(v, str):
+                    raise TypeError(f"'{k}={v}' must be a string or filesystem path")
+                cfg[k] = v
 
 
 def get_save_dir(args: SimpleNamespace, name: str | None = None) -> Path:
