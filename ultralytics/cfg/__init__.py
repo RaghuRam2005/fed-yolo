@@ -391,7 +391,7 @@ def check_cfg(cfg: dict, hard: bool = True) -> None:
                     )
                 cfg[k] = bool(v)
             elif k in CFG_PATH_KEYS:
-                if v is not None and isinstance(v, str):
+                if v is not None and not isinstance(v, str):
                     raise TypeError(f"'{k}={v}' must be a string or filesystem path")
                 cfg[k] = v
 
