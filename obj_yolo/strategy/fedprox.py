@@ -31,7 +31,7 @@ from obj_yolo.strategy.strategy_utils import (
     load_and_update_model
 )
 
-class CustomFedAvg(FedProx):
+class CustomFedProx(FedProx):
     """
     FedAvg class that works with YOLO architecture
     """
