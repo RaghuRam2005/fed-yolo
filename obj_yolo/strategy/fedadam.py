@@ -327,7 +327,7 @@ class CustomFedAdam(FedAdam):
             agg_arrays, agg_train_metrics = self.aggregate_train(
                 current_round, train_replies
             )
-
+            
             if agg_arrays is not None:
                 result.arrays = agg_arrays
                 arrays = agg_arrays

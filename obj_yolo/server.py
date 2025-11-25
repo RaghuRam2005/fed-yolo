@@ -47,6 +47,15 @@ def main(grid:Grid, context:Context) -> None:
         elif isinstance(val, torch.Tensor):
             trainable_parameters[k] = val
     
+    # In server_app.py, after loading initial model:
+    print("\n=== Initial Server Model ===")
+    print(f"Total params in state_dict: {len(state_dict)}")
+    print(f"Trainable params: {len(trainable_parameters)}")
+    print(f"Untrainable params: {len(untrainable_parameters)}")
+    print(f"Sum: {len(trainable_parameters) + len(untrainable_parameters)}")
+    assert len(state_dict) == len(trainable_parameters) + len(untrainable_parameters), \
+        "Parameter split doesn't match total!"
+    
     arrays = ArrayRecord(trainable_parameters, keep_input=True)
     untrain_arrays = ArrayRecord(untrainable_parameters)
 

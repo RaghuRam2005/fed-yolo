@@ -108,7 +108,7 @@ clientapp = "obj_yolo.client:client_app"
 num-server-rounds = 20
 fraction-train = 1.0
 local-epochs = 5
-lr = 0.01
+lr = 0.001
 
 [tool.setuptools]
 packages = ["obj_yolo"]
@@ -119,4 +119,4 @@ default = "local-simulation"
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 3
 options.backend.client-resources.num-cpus = 2
-options.backend.client-resources.num-gpus = 0.3
+options.backend.client-resources.num-gpus = 1
