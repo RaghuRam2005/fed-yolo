@@ -18,8 +18,8 @@ def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:f
         project='flwr_simulation',
         name=f'client_{partition_id}_train',
         exist_ok=True,
-        pretrained=False,
-        optimizer='Adam',
+        pretrained=True,
+        optimizer='Adam',     
         resume=False,
 
         seed=42,
@@ -30,19 +30,20 @@ def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:f
         
         val=True,
 
-        # hyprparameters
+        # Hyperparameters 
         hsv_h=0.015,
-        hsv_s=0.5,
-        hsv_v=0.3,
+        hsv_s=0.7,
+        hsv_v=0.4,
         degrees=0.0,
-        translate=0.05,
-        scale=0.3,
+        translate=0.1,
+        scale=0.5,
         shear=0.0,
         perspective=0.0,
         flipud=0.0,
         fliplr=0.5,
         bgr=0.0,
-        mosaic=0.5,
+        mosaic=1.0,
+        mixup=0.1,            
     )
     return train_results.box.map
 
@@ -55,13 +56,14 @@ def test(partition_id:int, model:Model, data_path:Path):
         device=0,
 
         plots=False,
+        rect=True,
 
         project='flwr_simulation',
         name=f'client_{partition_id}_val',
 
         conf=0.001,
         iou=0.6,
-        max_det=100,
+        max_det=300,
     )
     return validation_results.box.map
 
@@ -82,7 +84,7 @@ def eval_train(partition_id:int, model:Model, data_path:Path, local_epochs:int, 
         name=f'client_{partition_id}_eval_train',
         exist_ok=True,
 
-        pretrained=False,
+        pretrained=True,
 
         optimizer='Adam',
         resume=False,
@@ -96,9 +98,8 @@ def eval_train(partition_id:int, model:Model, data_path:Path, local_epochs:int, 
         
         val=True,
 
-        # hyprparameters
-
-        hsv_h=0.020,
+        # Hyperparameters
+        hsv_h=0.015,
         hsv_s=0.7,
         hsv_v=0.4,
         degrees=0.0,
@@ -110,5 +111,6 @@ def eval_train(partition_id:int, model:Model, data_path:Path, local_epochs:int, 
         fliplr=0.5,
         bgr=0.0,
         mosaic=1.0,
+        mixup=0.1,
     )
     return train_results.box.map
