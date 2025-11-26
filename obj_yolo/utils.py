@@ -18,8 +18,7 @@ def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:f
         project='flwr_simulation',
         name=f'client_{partition_id}_train',
         exist_ok=True,
-        pretrained=True,
-        optimizer='Adam',     
+        optimizer='auto',     
         resume=False,
 
         seed=42,
@@ -84,9 +83,7 @@ def eval_train(partition_id:int, model:Model, data_path:Path, local_epochs:int, 
         name=f'client_{partition_id}_eval_train',
         exist_ok=True,
 
-        pretrained=True,
-
-        optimizer='Adam',
+        optimizer='auto',
         resume=False,
         
         seed=42,
