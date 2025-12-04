@@ -192,7 +192,11 @@ class CustomFedAvg(FedAvg):
         )
 
         if aggregated_parameters is not None:
-            net = load_and_update_model(self.model_path, aggregated_parameters)            
+            net = load_and_update_model(self.model_path, aggregated_parameters)
+            aggregated_model_path = Path(Path.cwd() / 'flwr_simulation' / 'aggregated_model')
+            if not aggregated_model_path.exists():
+                aggregated_model_path.mkdir(parents=True, exist_ok=True)
+            net.save(str(aggregated_model_path / "agg_model.pt"))
             full_parameters = {k:val.detach() for k, val in net.model.state_dict().items() \
                                if not k.endswith(('running_mean', 'running_var', 'num_batches_tracked'))}
             return ArrayRecord(full_parameters), aggregated_metrics

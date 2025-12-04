@@ -33,8 +33,11 @@ def main(grid:Grid, context:Context) -> None:
     BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
     BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
     YOLO_CONFIG = Path(BASE_DIR_PATH) / "yolo_config" / "yolo11n.yaml"
+    model_path = Path(Path.cwd() / "flwr_simulation" / "aggregated_model")
+    model_path.mkdir(parents=True)
 
     global_model = YOLO(YOLO_CONFIG).load('yolo11n.pt')
+    global_model.save(str(model_path / "agg_model.pt"))
 
     # record global model state
     unwrapped_model = unwrap_model(global_model)

@@ -28,32 +28,34 @@ def train(msg:Message, context:Context):
     # search for data and YOLO config files
     BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
     BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
-    YOLO_CONFIG = Path(BASE_DIR_PATH) / "yolo_config" / "yolo11n.yaml"
+    MODEL_PATH = Path(Path.cwd() / "flwr_simulation" / "aggregated_model")
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError("Model path not found")
 
     # load new model instance everytime we run a client train
-    model = YOLO(YOLO_CONFIG)
+    model = YOLO(str(MODEL_PATH / "agg_model.pt"))
     new_arrays = msg.content['arrays'].to_torch_state_dict()
     untrainable_parameters = msg.content['untrain_arrays'].to_torch_state_dict()
-    
-    # Get fresh model state dict as template
-    state_dict = model.model.state_dict().copy()
-
-    # Update with received parameters
-    state_dict.update(new_arrays)
-
-    # Update with untrainable parameters if they exist
-    if untrainable_parameters:
-        state_dict.update(untrainable_parameters)
-        
-    # Verify all keys are present
-    expected_keys = set(model.model.state_dict().keys())
-    received_keys = set(state_dict.keys())
-    if expected_keys != received_keys:
-        print("WARNING: Key mismatch!")
-        print(f"Missing: {expected_keys - received_keys}")
-        print(f"Extra: {received_keys - expected_keys}")
-
-    model.model.load_state_dict(state_dict, strict=True)
+    #
+    ## Get fresh model state dict as template
+    #state_dict = model.model.state_dict().copy()
+#
+    ## Update with received parameters
+    #state_dict.update(new_arrays)
+#
+    ## Update with untrainable parameters if they exist
+    #if untrainable_parameters:
+    #    state_dict.update(untrainable_parameters)
+    #    
+    ## Verify all keys are present
+    #expected_keys = set(model.model.state_dict().keys())
+    #received_keys = set(state_dict.keys())
+    #if expected_keys != received_keys:
+    #    print("WARNING: Key mismatch!")
+    #    print(f"Missing: {expected_keys - received_keys}")
+    #    print(f"Extra: {received_keys - expected_keys}")
+#
+    #model.model.load_state_dict(state_dict, strict=True)
 
     # load configuration
     partition_id = context.node_config["partition-id"]
@@ -109,32 +111,34 @@ def evaluate(msg:Message, context:Context):
     # search for data and YOLO config files
     BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
     BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
-    YOLO_CONFIG = Path(BASE_DIR_PATH) / "yolo_config" / "yolo11n.yaml"
+    MODEL_PATH = Path(Path.cwd() / "flwr_simulation" / "aggregated_model")
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError("Model path not found")
 
     # load a new model instance
-    model = YOLO(YOLO_CONFIG)
+    model = YOLO(str(MODEL_PATH / "agg_model.pt"))
     new_arrays = msg.content['arrays'].to_torch_state_dict()
     untrainable_parameters = msg.content['untrain_arrays'].to_torch_state_dict()
 
     # Get fresh model state dict as template
-    state_dict = model.model.state_dict().copy()
+    #state_dict = model.model.state_dict().copy()
 
     # Update with received parameters
-    state_dict.update(new_arrays)
+    #state_dict.update(new_arrays)
 
     # Update with untrainable parameters if they exist
-    if untrainable_parameters:
-        state_dict.update(untrainable_parameters)
+    #if untrainable_parameters:
+    #    state_dict.update(untrainable_parameters)
         
     # Verify all keys are present
-    expected_keys = set(model.model.state_dict().keys())
-    received_keys = set(state_dict.keys())
-    if expected_keys != received_keys:
-        print("WARNING: Key mismatch!")
-        print(f"Missing: {expected_keys - received_keys}")
-        print(f"Extra: {received_keys - expected_keys}")
+    #expected_keys = set(model.model.state_dict().keys())
+    #received_keys = set(state_dict.keys())
+    #if expected_keys != received_keys:
+    #    print("WARNING: Key mismatch!")
+    #    print(f"Missing: {expected_keys - received_keys}")
+    #    print(f"Extra: {received_keys - expected_keys}")
 
-    model.model.load_state_dict(state_dict, strict=True)
+    #model.model.load_state_dict(state_dict, strict=True)
 
     # load the data
     partition_id = context.node_config["partition-id"]
