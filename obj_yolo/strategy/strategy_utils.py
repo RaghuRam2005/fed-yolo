@@ -63,9 +63,10 @@ def validate_message_reply_consistency(
             "aggregation."
         )
 
-def load_and_update_model(model_path:Path, aggregated_state:ArrayRecord) -> YOLO:
+def load_and_update_model(model_path:Path, aggregated_state:ArrayRecord, untrain_parameters:ArrayRecord) -> YOLO:
     net = YOLO(model_path)
     state_dict = net.model.state_dict().copy()
     state_dict.update(aggregated_state.to_torch_state_dict())
+    state_dict.update(untrain_parameters.to_torch_state_dict())
     net.model.load_state_dict(state_dict)
     return net

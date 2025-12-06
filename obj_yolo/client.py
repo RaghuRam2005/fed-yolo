@@ -36,26 +36,26 @@ def train(msg:Message, context:Context):
     model = YOLO(str(MODEL_PATH / "agg_model.pt"))
     new_arrays = msg.content['arrays'].to_torch_state_dict()
     untrainable_parameters = msg.content['untrain_arrays'].to_torch_state_dict()
-    #
-    ## Get fresh model state dict as template
-    #state_dict = model.model.state_dict().copy()
-#
-    ## Update with received parameters
+    
+    # Get fresh model state dict as template
+    state_dict = model.model.state_dict().copy()
+
+    # Update with received parameters
     #state_dict.update(new_arrays)
-#
-    ## Update with untrainable parameters if they exist
-    #if untrainable_parameters:
-    #    state_dict.update(untrainable_parameters)
-    #    
-    ## Verify all keys are present
+
+    # Update with untrainable parameters if they exist
+    if untrainable_parameters:
+        state_dict.update(untrainable_parameters)
+        
+    # Verify all keys are present
     #expected_keys = set(model.model.state_dict().keys())
     #received_keys = set(state_dict.keys())
     #if expected_keys != received_keys:
     #    print("WARNING: Key mismatch!")
     #    print(f"Missing: {expected_keys - received_keys}")
     #    print(f"Extra: {received_keys - expected_keys}")
-#
-    #model.model.load_state_dict(state_dict, strict=True)
+
+    model.model.load_state_dict(state_dict, strict=True)
 
     # load configuration
     partition_id = context.node_config["partition-id"]
@@ -120,15 +120,14 @@ def evaluate(msg:Message, context:Context):
     new_arrays = msg.content['arrays'].to_torch_state_dict()
     untrainable_parameters = msg.content['untrain_arrays'].to_torch_state_dict()
 
-    # Get fresh model state dict as template
-    #state_dict = model.model.state_dict().copy()
+    state_dict = model.model.state_dict().copy()
 
     # Update with received parameters
     #state_dict.update(new_arrays)
 
     # Update with untrainable parameters if they exist
-    #if untrainable_parameters:
-    #    state_dict.update(untrainable_parameters)
+    if untrainable_parameters:
+        state_dict.update(untrainable_parameters)
         
     # Verify all keys are present
     #expected_keys = set(model.model.state_dict().keys())
@@ -138,7 +137,7 @@ def evaluate(msg:Message, context:Context):
     #    print(f"Missing: {expected_keys - received_keys}")
     #    print(f"Extra: {received_keys - expected_keys}")
 
-    #model.model.load_state_dict(state_dict, strict=True)
+    model.model.load_state_dict(state_dict, strict=True)
 
     # load the data
     partition_id = context.node_config["partition-id"]

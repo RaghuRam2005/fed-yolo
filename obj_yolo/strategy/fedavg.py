@@ -191,8 +191,10 @@ class CustomFedAvg(FedAvg):
             self.weighted_by_key,
         )
 
+        untrain_parameters = self.untrain_arrays[0]
+
         if aggregated_parameters is not None:
-            net = load_and_update_model(self.model_path, aggregated_parameters)
+            net = load_and_update_model(self.model_path, aggregated_parameters, untrain_parameters)
             aggregated_model_path = Path(Path.cwd() / 'flwr_simulation' / 'aggregated_model')
             if not aggregated_model_path.exists():
                 aggregated_model_path.mkdir(parents=True, exist_ok=True)
