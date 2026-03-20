@@ -1,8 +1,8 @@
 """ Client App for federated learning """
 import os
+import logging
 from pathlib import Path
 
-import torch
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
@@ -12,6 +12,12 @@ from obj_yolo.utils import eval_train as train_val_fn
 
 from ultralytics import YOLO
 from ultralytics.utils.torch_utils import unwrap_model
+
+# logging while running the client
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 client_app = ClientApp()
 
@@ -24,139 +30,113 @@ def train(msg:Message, context:Context):
         msg (Message)
         context (Context)
     """
-
-    # search for data and YOLO config files
-    BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
-    BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
-    MODEL_PATH = Path(Path.cwd() / "flwr_simulation" / "aggregated_model")
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError("Model path not found")
-
-    # load new model instance everytime we run a client train
-    model = YOLO(str(MODEL_PATH / "agg_model.pt"))
-    new_arrays = msg.content['arrays'].to_torch_state_dict()
-    untrainable_parameters = msg.content['untrain_arrays'].to_torch_state_dict()
+    dataset_name = context.run_config["dataset-name"]
+    BASE_PATH = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
     
-    # Get fresh model state dict as template
-    state_dict = model.model.state_dict().copy()
-
-    # Update with received parameters
-    #state_dict.update(new_arrays)
-
-    # Update with untrainable parameters if they exist
-    if untrainable_parameters:
-        state_dict.update(untrainable_parameters)
+    # search the YOLO model file
+    model_path = Path(BASE_PATH ) / "flwr_simulation" / f"{dataset_name}" / "aggregated_model" / "agg_model.pt"
+    if not model_path.exists():
+        logging.error(f"Aggregated model not found at {model_path}")
+        raise FileNotFoundError(f"model.pt not found at {model_path}")
         
-    # Verify all keys are present
-    #expected_keys = set(model.model.state_dict().keys())
-    #received_keys = set(state_dict.keys())
-    #if expected_keys != received_keys:
-    #    print("WARNING: Key mismatch!")
-    #    print(f"Missing: {expected_keys - received_keys}")
-    #    print(f"Extra: {received_keys - expected_keys}")
-
-    model.model.load_state_dict(state_dict, strict=True)
+    # load the model
+    model = YOLO(model_path)
 
     # load configuration
     partition_id = context.node_config["partition-id"]
-    data_path = Path(BASE_DIR_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "data.yaml"
+    epochs = context.run_config["local-epochs"]
+    lr0 = context.run_config["lr0"]
+    
+    # count the images in the data folder
+    img_data_path = Path(BASE_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "images" / "train"
+    if not img_data_path.exists():
+        logging.error(f"Image file not found at {img_data_path}")
+        raise FileNotFoundError(f"Images not found at {img_data_path}")
+    data_count = len(list(img_data_path.glob("*")))
+    
+    # load data.yaml file
+    data_path = Path(BASE_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "data.yaml"
     if not data_path.exists():
-        raise Exception(f"Data Not prepared Exception: Client-{partition_id}")
-    data_count = len(os.listdir(Path(BASE_DIR_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "images" / "train"))
+        logging.error(f"DATA.yaml does not exist at {data_path}")
+        raise FileNotFoundError(f"data.yaml not found at {data_path}")
 
     # train the model
     train_metrics = train_fn(
-        partition_id=partition_id,
+        partition_id=int(partition_id),
         model=model,
         data_path=data_path,
-        local_epochs=context.run_config['local-epochs'],
-        lr0=msg.content["config"]["lr"],
+        local_epochs=int(epochs),
+        lr0 = float(lr0)
     )
 
     # construct the state dict of the model
     unwrapped_model = unwrap_model(model)
-    state_dict = unwrapped_model.model.state_dict()
-    trainable_parameters = {}
-    untrainable_parameters = {}
-    for k, val in state_dict.items():
-        if k.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-            untrainable_parameters[k] = val
-        elif isinstance(val, torch.Tensor):
-            trainable_parameters[k] = val
+    state_dict = unwrapped_model.state_dict()
     
-    print(f"\n=== Client {partition_id} Train Results ===")
-    print(f"Trainable params: {len(trainable_parameters)}")
-    print(f"Untrainable params: {len(untrainable_parameters)}")
-    print(f"Train mAP: {train_metrics}")
-    
-    det_head = [k for k in trainable_parameters.keys() if 'model.23' in k]
-    print(f"Detection head params: {len(det_head)}")
-    if det_head:
-        sample_param = trainable_parameters[det_head[0]]
-        print(f"Sample detection head param stats: mean={sample_param.mean():.4f}, std={sample_param.std():.4f}")
+    # save the trained model
+    model_path = Path(BASE_PATH) / "flwr_simulation" / f"{dataset_name}" / f"client_{partition_id}" / "model.pt"
+    model.save(model_path)
     
     # construct record and store them
-    model_record = ArrayRecord(trainable_parameters)
-    parameter_record = ArrayRecord(untrainable_parameters)
+    model_record = ArrayRecord(state_dict)
     metrics = {
         'train-map':train_metrics,
         'num-examples':data_count,
     }
     metrics_record = MetricRecord(metrics)
-    content = RecordDict({"arrays" : model_record, "metrics" : metrics_record, "untrain_arrays" : parameter_record})
+    content = RecordDict({"arrays" : model_record, "metrics" : metrics_record})
     return Message(content=content, reply_to=msg)
 
 @client_app.evaluate()
 def evaluate(msg:Message, context:Context):
-    # search for data and YOLO config files
-    BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
-    BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
-    MODEL_PATH = Path(Path.cwd() / "flwr_simulation" / "aggregated_model")
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError("Model path not found")
+    """
+    Evalute the aggregated metrics using the Federated clients
 
-    # load a new model instance
-    model = YOLO(str(MODEL_PATH / "agg_model.pt"))
-    new_arrays = msg.content['arrays'].to_torch_state_dict()
-    untrainable_parameters = msg.content['untrain_arrays'].to_torch_state_dict()
-
-    state_dict = model.model.state_dict().copy()
-
-    # Update with received parameters
-    #state_dict.update(new_arrays)
-
-    # Update with untrainable parameters if they exist
-    if untrainable_parameters:
-        state_dict.update(untrainable_parameters)
+    Args:
+        msg (Message): message object from algorithm
+        context (Context): context object from server
+    """
+    dataset_name = context.run_config["dataset-name"]
+    BASE_PATH = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
+    
+    # search the YOLO model file
+    model_path = Path(BASE_PATH ) / "flwr_simulation" / f"{dataset_name}" / "aggregated_model" / "agg_model.pt"
+    if not model_path.exists():
+        logging.error(f"Aggregated model not found at {model_path}")
+        raise FileNotFoundError(f"model.pt not found at {model_path}")
         
-    # Verify all keys are present
-    #expected_keys = set(model.model.state_dict().keys())
-    #received_keys = set(state_dict.keys())
-    #if expected_keys != received_keys:
-    #    print("WARNING: Key mismatch!")
-    #    print(f"Missing: {expected_keys - received_keys}")
-    #    print(f"Extra: {received_keys - expected_keys}")
+    # load the model
+    model = YOLO(model_path)
 
-    model.model.load_state_dict(state_dict, strict=True)
-
-    # load the data
+    # load configuration
     partition_id = context.node_config["partition-id"]
-    data_path = Path(BASE_DIR_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "data.yaml"
+    
+    # count the images in the data folder
+    img_data_path = Path(BASE_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "images" / "train"
+    if not img_data_path.exists():
+        logging.error(f"Image file not found at {img_data_path}")
+        raise FileNotFoundError(f"Images not found at {img_data_path}")
+    data_count = len(list(img_data_path.glob("*")))
+    
+    # load data.yaml file
+    data_path = Path(BASE_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "data.yaml"
     if not data_path.exists():
-        raise Exception(f"Data Not prepared Exception: Client-{partition_id}")
-    data_count = len(os.listdir(Path(BASE_DIR_PATH) / "dataset" / "clients" / f"client_{partition_id}" / "images" / "train"))
+        logging.error(f"DATA.yaml does not exist at {data_path}")
+        raise FileNotFoundError(f"data.yaml not found at {data_path}")
     
     # we are training model for warming up after loading the aggregation state
     eval_train = train_val_fn(
-        partition_id=partition_id,
+        partition_id=int(partition_id),
         model=model,
         data_path=data_path,
         local_epochs=3,
         lr0=0.001,
     )
+    
+    logging.info(f"Evaluation Training completed, now starting the evaluation, results: {eval_train}")
 
     eval_metrics = test_fn(
-        partition_id=partition_id,
+        partition_id=int(partition_id),
         model=model,
         data_path=data_path,
     )

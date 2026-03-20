@@ -23,52 +23,33 @@ def main(grid:Grid, context:Context) -> None:
         grid (Grid)
         context (Context)
     """
+    BASE_PATH = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
 
     # Read run config
-    fraction_train: float = context.run_config["fraction-train"]
-    num_rounds: int = context.run_config["num-server-rounds"]
-    lr: float = context.run_config["lr"]
+    dataset_name = context.run_config["dataset-name"]
+    fraction_train: int = int(context.run_config["fraction-train"])
+    num_rounds: int = int(context.run_config["num-server-rounds"])
+    lr: float = float(context.run_config["lr"])
 
     # Load global model
-    BASE_LIB_PATH = os.path.abspath(os.path.dirname(__file__))
-    BASE_DIR_PATH = os.path.dirname(BASE_LIB_PATH)
-    YOLO_CONFIG = Path(BASE_DIR_PATH) / "yolo_config" / "yolo11n.yaml"
-    model_path = Path(Path.cwd() / "flwr_simulation" / "aggregated_model")
-    model_path.mkdir(parents=True)
+    yolo_model_config = Path(BASE_PATH) / "yolo_config" / f"{dataset_name}_yolo11n.yaml"
+    model_path = Path(BASE_PATH) / "flwr_simulation" / f"{dataset_name}" / "aggregated_model" / "agg_model.pt"
 
-    global_model = YOLO(YOLO_CONFIG).load('yolo11n.pt')
-    global_model.save(str(model_path / "agg_model.pt"))
-
-    # record global model state
-    unwrapped_model = unwrap_model(global_model)
-    state_dict = unwrapped_model.model.state_dict()
-    trainable_parameters = {}
-    untrainable_parameters = {}
-    for k, val in state_dict.items():
-        if k.endswith(('running_mean', 'running_var', 'num_batches_tracked')):
-            untrainable_parameters[k] = val
-        elif isinstance(val, torch.Tensor):
-            trainable_parameters[k] = val
+    global_model = YOLO(yolo_model_config).load('yolo11n.pt')
+    global_model.save(model_path)
     
-    # In server_app.py, after loading initial model:
-    print("\n=== Initial Server Model ===")
-    print(f"Total params in state_dict: {len(state_dict)}")
-    print(f"Trainable params: {len(trainable_parameters)}")
-    print(f"Untrainable params: {len(untrainable_parameters)}")
-    print(f"Sum: {len(trainable_parameters) + len(untrainable_parameters)}")
-    assert len(state_dict) == len(trainable_parameters) + len(untrainable_parameters), \
-        "Parameter split doesn't match total!"
+    parameters = global_model.state_dict()
     
-    arrays = ArrayRecord(trainable_parameters, keep_input=True)
-    untrain_arrays = ArrayRecord(untrainable_parameters)
+    arrays = ArrayRecord(parameters, keep_input=True)
 
     # Initialize FedAvg strategy
     strategy = CustomFedAvg(
         fraction_train=fraction_train, 
-        fraction_evaluate=1.0, 
+        fraction_evaluate=1, 
         min_train_nodes=3,
         min_evaluate_nodes=3, 
         min_available_nodes=3,
+        dataset_name=str(dataset_name)
     )
     #strategy = CustomFedAdam(
     #    fraction_train=fraction_train,
@@ -87,9 +68,8 @@ def main(grid:Grid, context:Context) -> None:
     result = strategy.start(
         grid=grid,
         initial_arrays=arrays,
-        untrainable_parameters=untrain_arrays,
         train_config=ConfigRecord({"lr": lr}),
-        num_rounds=num_rounds,
+        num_rounds=num_rounds
     )
 
     # Save final model to disk
