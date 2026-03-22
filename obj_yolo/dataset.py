@@ -24,7 +24,7 @@ CLASSES = {
         "train": 11,
         "truck": 12,
     },
-    "kitti2D": {
+    "kitti": {
         "Car": 0,
         "Pedestrain": 1,
         "Van": 2,
@@ -213,7 +213,7 @@ class PrepareData:
                 image_02/   <- PNG/JPG images
             labels/         <- YOLO .txt files (same stem as images)
         """
-        src_img_path = self.baseDataPath / "training" / "image_02"
+        src_img_path = self.baseDataPath / "training" / "image_2"
         src_lbl_path = self.baseDataPath / "labels"
 
         if not src_img_path.exists():
@@ -338,7 +338,7 @@ class PrepareData:
 
 if __name__ == "__main__":
     PrepareData(
-        dataName="kitti2D",
+        dataName="kitti",
         baseDataPath=Path("./kitti_dataset"),
         finalDataPath=Path("./dataset/clients"),
         clientCount=5,
