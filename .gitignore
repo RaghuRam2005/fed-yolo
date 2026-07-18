@@ -30,7 +30,7 @@ ultralytics/
 # dataset folders
 base_data/
 prepared_data/
-bdd100k*
+/bdd100k*
 dataset/
 labels/
 training/

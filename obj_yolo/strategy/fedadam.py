@@ -32,7 +32,7 @@ class CustomFedAdam(FedAdam):
         super().__init__(fraction_train=fraction_train, fraction_evaluate=fraction_evaluate, min_train_nodes=min_train_nodes, min_evaluate_nodes=min_evaluate_nodes, min_available_nodes=min_available_nodes, weighted_by_key=weighted_by_key, arrayrecord_key=arrayrecord_key, configrecord_key=configrecord_key, train_metrics_aggr_fn=train_metrics_aggr_fn, evaluate_metrics_aggr_fn=evaluate_metrics_aggr_fn, eta=eta, eta_l=eta_l, beta_1=beta_1, beta_2=beta_2, tau=tau)
         self.base_path = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
         self.dataset_name = dataset_name
-        self.yolo_base_path = Path(self.base_path) / "yolo_config" / f"{dataset_name}_yolo11n.yaml"
+        self.yolo_base_path = Path(self.base_path) / "yolo_config" / f"{dataset_name}_yolo11.yaml"
 
     def start(
             self,

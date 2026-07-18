@@ -38,7 +38,7 @@ class CustomFedAvg(FedAvg):
         super().__init__(fraction_train=fraction_train, fraction_evaluate=fraction_evaluate, min_train_nodes=min_train_nodes, min_evaluate_nodes=min_evaluate_nodes, min_available_nodes=min_available_nodes)
         self.base_path = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
         self.dataset_name = dataset_name
-        self.yolo_base_path = Path(self.base_path) / "yolo_config" / f"{dataset_name}_yolo11n.yaml"
+        self.yolo_base_path = Path(self.base_path) / "yolo_config" / f"{dataset_name}_yolo11.yaml"
     
     def aggregate_train(
         self,

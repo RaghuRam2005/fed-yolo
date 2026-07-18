@@ -31,10 +31,20 @@ clientapp = "obj_yolo.client:client_app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
+dataset-name = "kitti"
+strategy-name = "fedavg"
 num-server-rounds = 20
 fraction-train = 1.0
 local-epochs = 5
 lr0 = 0.001
+lr = 0.001
+
+# FedAdam-only knobs (used when strategy-name = "fedadam")
+fedadam-eta = 0.1
+fedadam-eta-l = 0.3
+fedadam-beta1 = 0.9
+fedadam-beta2 = 0.9
+fedadam-tau = 0.001
 
 [tool.setuptools]
 packages = ["obj_yolo"]

@@ -9,8 +9,7 @@ from flwr.serverapp import Grid, ServerApp
 from ultralytics import YOLO
 from ultralytics.utils.torch_utils import unwrap_model
 
-from obj_yolo.strategy.fedavg import CustomFedAvg
-from obj_yolo.strategy.fedadam import CustomFedAdam
+from obj_yolo.strategy.registry import build_strategy
 
 server_app = ServerApp()
 
@@ -30,9 +29,10 @@ def main(grid:Grid, context:Context) -> None:
     fraction_train: int = int(context.run_config["fraction-train"])
     num_rounds: int = int(context.run_config["num-server-rounds"])
     lr: float = float(context.run_config["lr"])
+    strategy_name: str = str(context.run_config.get("strategy-name", "fedavg"))
 
     # Load global model
-    yolo_model_config = Path(BASE_PATH) / "yolo_config" / f"{dataset_name}_yolo11n.yaml"
+    yolo_model_config = Path(BASE_PATH) / "yolo_config" / f"{dataset_name}_yolo11.yaml"
     model_path = Path(BASE_PATH) / "flwr_simulation" / f"{dataset_name}" / "aggregated_model" / "agg_model.pt"
 
     global_model = YOLO(yolo_model_config).load('yolo11n.pt')
@@ -42,29 +42,15 @@ def main(grid:Grid, context:Context) -> None:
     
     arrays = ArrayRecord(parameters, keep_input=True)
 
-    # Initialize FedAvg strategy
-    strategy = CustomFedAvg(
-        fraction_train=fraction_train, 
-        fraction_evaluate=1, 
-        min_train_nodes=3,
-        min_evaluate_nodes=3, 
-        min_available_nodes=3,
-        dataset_name=str(dataset_name)
+    # Initialize the strategy selected via the `strategy-name` run-config key
+    strategy = build_strategy(
+        strategy_name,
+        fraction_train=fraction_train,
+        dataset_name=str(dataset_name),
+        run_config=context.run_config,
     )
-    #strategy = CustomFedAdam(
-    #    fraction_train=fraction_train,
-    #    fraction_evaluate=1.0,
-    #    min_train_nodes=2,
-    #    min_evaluate_nodes=2,
-    #    min_available_nodes=2,
-    #    eta=0.1,
-    #    eta_l=0.3,
-    #    beta_1=0.9,
-    #    beta_2=0.9,
-    #    tau=0.001,
-    #)
 
-    # Start strategy, run FedAvg for `num_rounds`
+    # Start strategy, run for `num_rounds`
     result = strategy.start(
         grid=grid,
         initial_arrays=arrays,
