@@ -36,7 +36,7 @@ class CustomFedAvg(FedAvg):
     """
     def __init__(self, *, fraction_train = 1, fraction_evaluate = 1, min_train_nodes = 2, min_evaluate_nodes = 2, min_available_nodes = 2, dataset_name:str = "kitti"):
         super().__init__(fraction_train=fraction_train, fraction_evaluate=fraction_evaluate, min_train_nodes=min_train_nodes, min_evaluate_nodes=min_evaluate_nodes, min_available_nodes=min_available_nodes)
-        self.base_path = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
+        self.base_path = os.path.dirname(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
         self.dataset_name = dataset_name
         self.yolo_base_path = Path(self.base_path) / "yolo_config" / f"{dataset_name}_yolo11.yaml"
     

@@ -3,22 +3,24 @@ from pathlib import Path
 
 from ultralytics.engine.model import Model
 
-def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:float):
-    train_results = model.train(
+from obj_yolo.train_hooks import make_l1_sparse_trainer
+
+def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:float, l1_lambda:float = 0.0):
+    train_kwargs = dict(
         data=data_path,
         epochs=local_epochs,
         batch=16,
         imgsz=640,
         device=0,
-        
+
         save=False,
         cache=False,
         plots=False,
-        
+
         project='flwr_simulation',
         name=f'client_{partition_id}_train',
         exist_ok=True,
-        optimizer='auto',     
+        optimizer='auto',
         resume=False,
 
         seed=42,
@@ -26,10 +28,10 @@ def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:f
         amp=True,
         freeze=None,
         lr0=lr0,
-        
+
         val=True,
 
-        # Hyperparameters 
+        # Hyperparameters
         hsv_h=0.015,
         hsv_s=0.7,
         hsv_v=0.4,
@@ -42,8 +44,12 @@ def train(partition_id:int, model:Model, data_path:Path, local_epochs:int, lr0:f
         fliplr=0.5,
         bgr=0.0,
         mosaic=1.0,
-        mixup=0.1,            
+        mixup=0.1,
     )
+    if l1_lambda > 0:
+        # FedTag/FedWeg channel-sparsity penalty on BatchNorm gamma factors
+        train_kwargs["trainer"] = make_l1_sparse_trainer(l1_lambda)
+    train_results = model.train(**train_kwargs)
     return train_results.box.map
 
 def test(partition_id:int, model:Model, data_path:Path):

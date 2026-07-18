@@ -4,6 +4,7 @@ from typing import Any, Callable
 
 from obj_yolo.strategy.fedavg import CustomFedAvg
 from obj_yolo.strategy.fedadam import CustomFedAdam
+from obj_yolo.strategy.fedtag import FedTag
 
 
 def _build_fedavg(*, fraction_train: float, dataset_name: str, run_config: Any) -> CustomFedAvg:
@@ -33,10 +34,28 @@ def _build_fedadam(*, fraction_train: float, dataset_name: str, run_config: Any)
     )
 
 
-# Add an entry here when a new algorithm strategy is merged (e.g. fedprox, fedtag).
+def _build_fedtag(*, fraction_train: float, dataset_name: str, run_config: Any) -> FedTag:
+    return FedTag(
+        fraction_train=fraction_train,
+        fraction_evaluate=1.0,
+        min_train_nodes=3,
+        min_evaluate_nodes=3,
+        min_available_nodes=3,
+        dataset_name=dataset_name,
+        l1_init=float(run_config.get("fedtag-l1-init", 0.2)),
+        l1_min=float(run_config.get("fedtag-l1-min", 0.2)),
+        l1_max=float(run_config.get("fedtag-l1-max", 0.8)),
+        l1_step=float(run_config.get("fedtag-l1-step", 0.02)),
+        convergence_window=int(run_config.get("fedtag-convergence-window", 5)),
+        convergence_threshold=float(run_config.get("fedtag-convergence-threshold", 0.001)),
+    )
+
+
+# Add an entry here when a new algorithm strategy is merged (e.g. fedprox).
 STRATEGY_BUILDERS: dict[str, Callable[..., Any]] = {
     "fedavg": _build_fedavg,
     "fedadam": _build_fedadam,
+    "fedtag": _build_fedtag,
 }
 
 

@@ -46,6 +46,14 @@ fedadam-beta1 = 0.9
 fedadam-beta2 = 0.9
 fedadam-tau = 0.001
 
+# FedTag-only knobs (used when strategy-name = "fedtag"; dataset-name should be "bdd100k")
+fedtag-l1-init = 0.2
+fedtag-l1-min = 0.2
+fedtag-l1-max = 0.8
+fedtag-l1-step = 0.02
+fedtag-convergence-window = 5
+fedtag-convergence-threshold = 0.001
+
 [tool.setuptools]
 packages = ["obj_yolo"]
 

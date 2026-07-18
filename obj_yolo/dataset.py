@@ -40,6 +40,9 @@ CLASSES = {
 BDD100K_IMG_W: int = 1280
 BDD100K_IMG_H: int = 720
 
+# BDD100K weather attribute values used to tag clients for FedTag
+BDD_WEATHER_TAGS = ["clear", "overcast", "snowy", "rainy", "cloudy", "foggy"]
+
 class PrepareData:
     """
     Unified dataset preparation for KITTI and BDD100K federated learning.
@@ -161,6 +164,51 @@ class PrepareData:
 
         return client_files
 
+    def _assign_tags_to_clients(self) -> dict[str, str]:
+        """Randomly assign one BDD100K weather tag to each client (tags may repeat)."""
+        return {str(cid): self.rng.choice(BDD_WEATHER_TAGS) for cid in range(self.clientCount)}
+
+    def _slice_images_by_tag(
+        self,
+        tag_images: dict[str, list[str]],
+        client_tag_map: dict[str, str],
+    ) -> dict[str, list[str]]:
+        """Split each tag's image pool equally among the clients assigned that tag."""
+        tag_to_clients: dict[str, list[str]] = {}
+        for cid, tag in client_tag_map.items():
+            tag_to_clients.setdefault(tag, []).append(cid)
+
+        client_files: dict[str, list[str]] = {cid: [] for cid in client_tag_map}
+        for tag, clients in tag_to_clients.items():
+            pool = tag_images.get(tag, []).copy()
+            self.rng.shuffle(pool)
+            if not pool:
+                print(f"  WARNING: tag '{tag}' has no images — {clients} will be empty")
+                continue
+            chunk = len(pool) // len(clients)
+            for idx, cid in enumerate(clients):
+                start = idx * chunk
+                end = start + chunk if idx < len(clients) - 1 else len(pool)
+                client_files[cid] = pool[start:end]
+
+        return client_files
+
+    def _write_client_tags(self, client_tag_map: dict[str, str]) -> None:
+        """Persist the client_id -> weather_tag mapping for later use by FedTag."""
+        with open(self.finalDataPath / "client_tags.json", "w") as f:
+            json.dump(client_tag_map, f, indent=2)
+
+    @staticmethod
+    def load_client_tags(finalDataPath: Path) -> dict[str, str]:
+        """Load the client_id -> weather_tag mapping written by _write_client_tags."""
+        tag_path = Path(finalDataPath) / "client_tags.json"
+        if not tag_path.exists():
+            raise FileNotFoundError(
+                f"client_tags.json not found at {tag_path}. Run PrepareData for bdd100k first."
+            )
+        with open(tag_path, "r") as f:
+            return json.load(f)
+
     def _write_client_files(
         self,
         client_files: dict[str, list[str]],
@@ -271,6 +319,7 @@ class PrepareData:
         staging_lbl_path.mkdir(parents=True, exist_ok=True)
 
         valid_images: list[str] = []
+        image_weather: dict[str, str] = {}
         skipped = 0
 
         for entry in annotations:
@@ -281,6 +330,11 @@ class PrepareData:
             if not (src_img_path / img_name).exists():
                 skipped += 1
                 continue
+
+            weather = str(entry.get("attributes", {}).get("weather", "")).lower().strip()
+            if weather not in BDD_WEATHER_TAGS:
+                weather = "clear"
+            image_weather[img_name] = weather
 
             labels: list[dict] = entry.get("labels", []) or []
             yolo_lines: list[str] = []
@@ -320,10 +374,17 @@ class PrepareData:
 
         print(
             f"Found {len(valid_images)} BDD100K images"
-            f"splitting across {self.clientCount} clients"
+            f"splitting across {self.clientCount} clients by weather tag"
         )
 
-        client_files = self._random_split_into_clients(valid_images)
+        tag_images: dict[str, list[str]] = {}
+        for img_name in valid_images:
+            tag_images.setdefault(image_weather[img_name], []).append(img_name)
+
+        client_tag_map = self._assign_tags_to_clients()
+        print(f"  Client -> weather tag assignment: {client_tag_map}")
+        client_files = self._slice_images_by_tag(tag_images, client_tag_map)
+        self._write_client_tags(client_tag_map)
 
         print("\n=== Writing client data ===")
         self._write_client_files(client_files, src_img_path, staging_lbl_path)
