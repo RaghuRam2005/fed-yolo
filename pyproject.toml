@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fed-yolo"
-version = "1.0.1"
-description = "Federated Learning Environment Simulation usign flwr and ultralytics"
+version = "2.0.0"
+description = "YOLOv8 object detection implemented from scratch in PyTorch (federated learning integration: future work)"
 readme = "README.md"
 requires-python = ">=3.12"
 
@@ -14,53 +14,14 @@ authors = [
 ]
 
 dependencies = [
-    "flwr[simulation]>=1.27.0",
     "pyyaml>=6.0.3",
-    "ultralytics>=8.4.24",
+    "torch>=2.4.0",
+    "torchvision>=0.19.0",
+    "torchmetrics[detection]>=1.4.0",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
 
-[tool.flwr.app]
-publisher = "RaghuRam2005"
-
-[tool.flwr.app.components]
-serverapp = "obj_yolo.server:server_app"
-clientapp = "obj_yolo.client:client_app"
-
-# Custom config values accessible via `context.run_config`
-[tool.flwr.app.config]
-dataset-name = "kitti"
-strategy-name = "fedavg"
-num-server-rounds = 20
-fraction-train = 1.0
-local-epochs = 5
-lr0 = 0.001
-lr = 0.001
-
-# FedAdam-only knobs (used when strategy-name = "fedadam")
-fedadam-eta = 0.1
-fedadam-eta-l = 0.3
-fedadam-beta1 = 0.9
-fedadam-beta2 = 0.9
-fedadam-tau = 0.001
-
-# FedTag-only knobs (used when strategy-name = "fedtag"; dataset-name should be "bdd100k")
-fedtag-l1-init = 0.2
-fedtag-l1-min = 0.2
-fedtag-l1-max = 0.8
-fedtag-l1-step = 0.02
-fedtag-convergence-window = 5
-fedtag-convergence-threshold = 0.001
-
 [tool.setuptools]
 packages = ["obj_yolo"]
-
-[tool.flwr.federations]
-default = "local-simulation"
-
-[tool.flwr.federations.local-simulation]
-options.num-supernodes = 3
-options.backend.client-resources.num-cpus = 2
-options.backend.client-resources.num-gpus = 1
