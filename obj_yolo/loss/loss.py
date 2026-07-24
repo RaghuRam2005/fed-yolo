@@ -96,6 +96,9 @@ class DetectionLoss:
         box_gain: float = 7.5,
         cls_gain: float = 0.5,
         dfl_gain: float = 1.5,
+        tal_topk: int = 10,
+        tal_alpha: float = 0.5,
+        tal_beta: float = 6.0,
         device: Optional[torch.device] = None,
     ) -> None:
         self.nc = nc
@@ -106,7 +109,7 @@ class DetectionLoss:
         self.box_gain, self.cls_gain, self.dfl_gain = box_gain, cls_gain, dfl_gain
 
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
-        self.assigner = TaskAlignedAssigner(topk=10, num_classes=nc, alpha=0.5, beta=6.0)
+        self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=nc, alpha=tal_alpha, beta=tal_beta)
         self.bbox_loss = BboxLoss(reg_max)
         self.proj = torch.arange(reg_max, dtype=torch.float, device=self.device)
 

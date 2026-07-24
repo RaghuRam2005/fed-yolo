@@ -1,19 +1,22 @@
 """
-Evaluation entrypoint: decode YOLOv8 predictions (DFL -> ltrb -> xyxy),
-NMS, and compute mAP@0.5 / mAP@0.5:0.95 via torchmetrics.
+Evaluation entrypoint: decode YOLOv8 predictions (DFL -> ltrb -> xyxy), NMS,
+and compute precision/recall/F1/mAP50/mAP50-95 via the custom
+`obj_yolo.metrics.detection_metrics` engine (no torchmetrics/pycocotools
+dependency).
 
     uv run python -m obj_yolo.val --data dataset/client_0/data.yaml --weights runs/train/weights/best.pt
 """
 import argparse
+import sys
 from pathlib import Path
 
 import torch
 import torchvision
-import yaml
 from torch.utils.data import DataLoader
-from torchmetrics.detection import MeanAveragePrecision
 
+from obj_yolo.config_validation import validate_data_yaml, validate_imgsz
 from obj_yolo.data.yolo_dataset import YoloDataset, collate_fn
+from obj_yolo.metrics.detection_metrics import DetMetrics
 from obj_yolo.model.yolov8 import YOLOv8
 
 
@@ -53,11 +56,12 @@ def evaluate(
     device: torch.device,
     conf_thres: float = 0.001,
     iou_thres: float = 0.6,
-) -> dict[str, float]:
-    """Run `model` over `loader` and compute COCO-style mAP via torchmetrics."""
+) -> dict:
+    """Run `model` over `loader` and compute precision/recall/F1/mAP50/mAP50-95
+    (dataset means + per-class breakdown) via `DetMetrics`."""
     was_training = model.training
     model.eval()
-    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+    metric = DetMetrics(nc=model.nc)
 
     for batch in loader:
         imgs = batch["img"].to(device)
@@ -65,12 +69,8 @@ def evaluate(
         dets = postprocess(preds, conf_thres=conf_thres, iou_thres=iou_thres)
 
         batch_idx = batch["batch_idx"]
-        preds_mt, targets_mt = [], []
         imgsz = imgs.shape[-1]
         for i in range(imgs.shape[0]):
-            d = dets[i]
-            preds_mt.append({"boxes": d[:, :4].cpu(), "scores": d[:, 4].cpu(), "labels": d[:, 5].long().cpu()})
-
             m = batch_idx == i
             boxes_n, cls_n = batch["bboxes"][m], batch["cls"][m]
             if boxes_n.shape[0]:
@@ -78,13 +78,11 @@ def evaluate(
                 gt_xyxy = torch.stack([x - w / 2, y - h / 2, x + w / 2, y + h / 2], dim=1)
             else:
                 gt_xyxy = torch.zeros(0, 4)
-            targets_mt.append({"boxes": gt_xyxy, "labels": cls_n.long()})
-
-        metric.update(preds_mt, targets_mt)
+            metric.update(dets[i].cpu(), gt_xyxy.cpu(), cls_n.long().cpu())
 
     result = metric.compute()
     model.train(was_training)
-    return {"map": float(result["map"]), "map_50": float(result["map_50"])}
+    return result
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,10 +99,16 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    device = torch.device(args.device)
+    try:
+        validate_imgsz(args.imgsz)
+        data_cfg = validate_data_yaml(args.data)
+        if "val" not in data_cfg:
+            raise ValueError(f"{args.data} is missing required key 'val'")
+    except (ValueError, FileNotFoundError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    with open(args.data) as f:
-        data_cfg = yaml.safe_load(f)
+    device = torch.device(args.device)
     nc = int(data_cfg["nc"])
     val_dir = Path(data_cfg["val"])
     labels_dir = Path(str(val_dir).replace("images", "labels"))
@@ -118,7 +122,10 @@ def main() -> None:
     )
 
     metrics = evaluate(model, val_loader, device)
-    print(f"mAP50-95={metrics['map']:.4f}  mAP50={metrics['map_50']:.4f}")
+    print(
+        f"P={metrics['precision']:.4f}  R={metrics['recall']:.4f}  F1={metrics['f1']:.4f}  "
+        f"mAP50={metrics['map50']:.4f}  mAP50-95={metrics['map']:.4f}"
+    )
 
 
 if __name__ == "__main__":

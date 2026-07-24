@@ -51,7 +51,15 @@ class Detect(nn.Module):
         self.nl = len(ch)
         self.reg_max = 16
         self.no = nc + self.reg_max * 4
-        self.stride = torch.zeros(self.nl)  # populated by YOLOv8._init_strides()
+        # Registered as a non-persistent buffer: `model.to(device)` now moves
+        # it like every other tensor (a plain attribute never would have),
+        # while `persistent=False` keeps it out of state_dict()/checkpoints/
+        # FL aggregation payloads, exactly like before -- it's architecture-
+        # derived (same nc+scale always gives the same stride), never learned.
+        # Populated for real by YOLOv8._init_strides(); nn.Module.__setattr__
+        # routes that later plain `self.stride = ...` reassignment back into
+        # this same registered buffer rather than shadowing it.
+        self.register_buffer("stride", torch.zeros(self.nl), persistent=False)
 
         c2 = max(16, ch[0] // 4, self.reg_max * 4)
         c3 = max(ch[0], min(self.nc, 100))

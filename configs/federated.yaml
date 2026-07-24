@@ -1,0 +1,61 @@
+# Example config for `uv run python -m obj_yolo.train_federated --config configs/federated.yaml`.
+#
+# Precedence: code defaults (obj_yolo/config.py::FEDERATED_DEFAULTS) < this
+# file < explicit CLI flags. `--data-root`/`--num-clients`/`--nc` still have
+# to be passed on the CLI (or add data_root/num_clients/nc keys here --
+# either works).
+
+# --- data / model ---
+# data_root: dataset/clients
+# num_clients: 5
+# nc: 13
+scale: n              # n | s | m | l | x
+imgsz: 640
+
+# --- federated schedule ---
+rounds: 20
+local_epochs: 1
+fraction_fit: 1.0        # fraction of clients sampled per round (clamped to (0, 1])
+batch: 8
+
+# --- client-local optimizer (plain SGD; see obj_yolo/train.py::build_optimizer) ---
+lr0: 0.01
+momentum: 0.937
+weight_decay: 0.0005
+
+# --- loss gains (DetectionLoss: box CIoU / cls BCE / DFL) ---
+box_gain: 7.5
+cls_gain: 0.5
+dfl_gain: 1.5
+
+# --- Task-Aligned Assigner ---
+tal_topk: 10
+tal_alpha: 0.5
+tal_beta: 6.0
+
+# --- validation-time NMS thresholds (loose, for a full PR curve) ---
+eval_conf_thres: 0.001
+eval_iou_thres: 0.6
+
+# --- augmentation (obj_yolo/data/augment.py::DEFAULT_HYP) ---
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+degrees: 0.0
+translate: 0.1
+aug_scale: 0.5           # renamed from augment.py's "scale" to avoid colliding with model `scale` above
+shear: 0.0
+fliplr: 0.5
+mosaic: 1.0
+
+# --- optional central held-out validation set (skip both to disable centralized eval) ---
+# val_images: dataset/clients/client_0/images/val
+# val_labels: dataset/clients/client_0/labels/val
+val_batch: 8
+
+# --- logging / run tracking ---
+project: runs/federated
+run_name: null             # null = auto timestamp
+tensorboard: true
+log_histograms: true         # global-model weight histograms every round (heavier, see README)
+seed: 42
